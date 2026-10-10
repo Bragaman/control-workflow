@@ -1,0 +1,48 @@
+{
+  "adapter": "herdr-codex",
+  "git_mode": "main",
+  "agent_start_timeout_ms": 180000,
+  "profiles": {
+    "implementation": {
+      "normal": {
+        "model": "default",
+        "reasoning_effort": "medium"
+      },
+      "complex": {
+        "model": "default",
+        "reasoning_effort": "medium"
+      }
+    },
+    "research": {
+      "normal": {
+        "model": "default",
+        "reasoning_effort": "medium"
+      },
+      "complex": {
+        "model": "default",
+        "reasoning_effort": "high"
+      }
+    },
+    "reasoning": {
+      "normal": {
+        "model": "default",
+        "reasoning_effort": "medium"
+      },
+      "complex": {
+        "model": "default",
+        "reasoning_effort": "high"
+      }
+    },
+    "planning": {
+      "normal": {
+        "model": "default",
+        "reasoning_effort": "medium"
+      },
+      "complex": {
+        "model": "default",
+        "reasoning_effort": "high"
+      }
+    }
+  },
+  "schema_version": 1
+}
