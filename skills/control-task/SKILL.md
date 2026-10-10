@@ -1,20 +1,16 @@
 ---
 name: control-task
-description: Создать или изменить задачу, её цель, критерии, статус, зависимости и приёмщика в контрольной панели.
+description: Создать или изменить задачу контрольной панели, критерии, зависимости и приёмщика.
 ---
 
-Прочитай [команду и выбор экземпляра](../../docs/control-entry.md).
+Если контракт экземпляра ещё не прочитан, читай
+[control-entry.md](../../docs/control-entry.md).
 Для создания нужны проект, цель и проверяемые критерии. Выведи их из запроса;
 уточни существенные пробелы одним сообщением. До передачи работы сохрани план
 по [planning.md](../../docs/planning.md).
 
 `task-create ID --project ID --title '...' --goal '...' --acceptance '...'`.
-Выбери --task-kind research|reasoning|planning|implementation по основной работе.
-Обычная диагностика и исправление — implementation/normal. Самостоятельное
-исследование или анализ — research/reasoning; сложный анализ взаимосвязей —
---complexity complex. Реализация готового плана — implementation независимо
-от сложности. Модель и effort берутся из выбранной конфигурации; наличие
-worktree не влияет на профиль. Смешанные этапы раздели, если нужны разные исполнители.
+Тип и сложность выбери по [task-profile.md](../../docs/task-profile.md).
 
 --code нужен для изменений отслеживаемых файлов репозитория; --no-code —
 для чтения и применения существующих настроек на хост. Повторяемый --repo
@@ -24,4 +20,5 @@ Git-режим выбери по [git-policy.md](../../docs/git-policy.md).
 
 Редактирование: task-set ID --goal '...' --acceptance '...' --status ready;
 тип/сложность — --task-kind и --complexity. Для running/blocked используй
-progress/block/answer/interrupt по [worker.md](../../docs/worker.md).
+progress; для вопросов — [questions.md](../../docs/questions.md),
+для interrupt — [recovery.md](../../docs/recovery.md).

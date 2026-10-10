@@ -1,9 +1,10 @@
 ---
 name: control-memory
-description: Найти или сохранить решения, знания и отчёты о работе в памяти проекта контрольной панели.
+description: Найти или сохранить решения, знания и отчёты в памяти панели.
 ---
 
-Прочитай [команду и выбор экземпляра](../../docs/control-entry.md).
+Если контракт экземпляра ещё не прочитан, читай
+[control-entry.md](../../docs/control-entry.md).
 Ищи выборочно: memory-list --project ID --query 'тема'; команда включает shared.
 Сохраняй решения, проверенные знания и отчёты через memory-add --project ID
 --kind decision|knowledge|work --title '...' --file /path/artifact.md.

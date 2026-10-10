@@ -8,11 +8,11 @@ environment. Выбирай state/config/bindings до записи данных
 команда open ID…; покажи статус и цель, не жди исполнителя. Его сообщение
 начинай с TASK_ID: . Вне herdr укажи --herdr-session NAME.
 
-Для списка читай skills/control-list/SKILL.md; для проекта — control-project;
-для задачи — control-task; для запуска — control-start; для результата —
-control-review; для памяти — control-memory; для сверки — control-sync;
-для приёмки и закрытия по поручению пользователя — control-complete.
-Файлы находятся в skills/; читай только подходящий SKILL.md.
+Читай только нужный skills/control-ИМЯ/SKILL.md: для списка — list;
+для проекта — project;
+для создания/правки задачи — task; для запуска — start; для прогресса, вопросов
+и результата — review; для памяти — memory; для сверки — sync;
+для приёмки/отмены по поручению пользователя — complete.
 
 План покажи в чате и сохрани до работы по docs/planning.md. Исполнитель читает
 assignment.md и docs/worker.md, сохраняет артефакты и результат через finish.

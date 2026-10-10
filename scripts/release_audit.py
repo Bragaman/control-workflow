@@ -12,7 +12,7 @@ SCRIPTS = ('control', 'completion_git', 'install_skills', 'artifact_links', 'her
            'runtime_config', 'platform_support', 'agent_adapters', 'herdr_claude', 'install',
            'doctor', 'release_audit')
 DOCS = ('worker', 'planning', 'control-entry', 'git-policy', 'recovery', 'runtime-layout',
-        'install', 'architecture', 'compatibility')
+        'install', 'architecture', 'compatibility', 'questions', 'task-profile')
 SKILLS = ('list', 'project', 'task', 'start', 'review', 'complete', 'memory', 'sync')
 ALLOWLIST = ({'README.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE.pending', '.gitignore',
               'config/defaults.json', 'examples/config-codex.json', 'examples/config-claude.json',
