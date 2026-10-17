@@ -15,7 +15,7 @@
     "docs/install.md": "2599fefd95d1aed0d47291ce68eff8823964c4df3f5b8d449c9e01bb7f66abfc",
     "docs/planning.md": "f9785d33fa9be482ec9da630817c56fead4ebd96bcf70b62fbf188a395b7882c",
     "docs/questions.md": "c54f7d3bd6d4db96e50d445e334094403a098a8d35ef71420db8655d794407f7",
-    "docs/recovery.md": "8ccab62b66251f6d210b9f442845dd95a7baedb7296196000ba890069f56e761",
+    "docs/recovery.md": "6d6a8e39a5f7e2fc8ad5a984f8680cfd3323f5606367702c2f4d014c73359840",
     "docs/runtime-layout.md": "b836ce52e15bf76a397784ec918a2f089ed7106de055bff334681e68f04c26f5",
     "docs/task-profile.md": "c07ca873c229b221176f8e92a5c54f8a189972e40aef0145684965ab61c407f5",
     "docs/worker.md": "d89023e67713eb0561ae85a0d2ca8c021e616b98ce2f1c2f8993f725bce79119",
@@ -26,7 +26,7 @@
     "scripts/agent_adapters.py": "0727a621746e8c4a817ec1d295e78678152e2333d8a71351918859d9aac8714a",
     "scripts/artifact_links.py": "dad52062b6cc53f13db5f2f0a0ef7a0607dbd130d8d2f8251e1224653461ee31",
     "scripts/completion_git.py": "863f2e7eadf382f316dadd374d2b24ac900d4dfbc5dde63a6c4b75ca8c10b6a4",
-    "scripts/control.py": "b6462d6bc0e1d73bee4d24715505879721577719391ad5717646f29c9855d1b1",
+    "scripts/control.py": "04a5241584935e4a7b70a286edf773247cf1de259ac567e82f777c975001e3c9",
     "scripts/doctor.py": "cb3ad0ceaef99a21269dd2de047b29d8a855d8733e9fbbeb7cfc70aa41f0c088",
     "scripts/herdr_claude.py": "c40ff66e3e8e1dc8e5feac89c3876b9cce9168fa2428561e3a141e266fdfa199",
     "scripts/herdr_codex.py": "bb8129bef995e5e477a9e91a0b577aef37f96b14eefa614fc3e1cb48f6e742bc",
@@ -44,7 +44,7 @@
     "skills/control-sync/SKILL.md": "76091dc28c0ce26dd65fab9e7d10f4c0b3d0de4f1a472cef659df66088eabc15",
     "skills/control-sync/references/checks.md": "232b9d8052f57d9fcb6222a5bf37f5f5f7473763e744e1775228a7c34dc670a6",
     "skills/control-task/SKILL.md": "7e49224d5a8e941452016e15fe0e9baaff339e45ae70907b9587587432ea6dd1",
-    "tests/test_control.py": "a7b0efdcda72044ed4227f56f613bfe474ed59b3239a928cfa87c4e607f4dc4d",
+    "tests/test_control.py": "d081d97e8c580d83f0bc55e8aa670c035d96ccf632f0fc289d7dc67a00809fc5",
     "tests/test_public.py": "b53c9e535fec2de84ecdfa433fb95192281eb65859e5d3766024a3c5a9c8ca6a",
     "tests/test_runtime.py": "0758f463979a7b776271e1887b021b608c502afd703fe3d954093ff017a6b7ab"
   }

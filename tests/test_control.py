@@ -83,6 +83,12 @@ elif a[:2] == ["pane", "split"]:
     r = {"pane": {"pane_id": "w7:p3"}}
 elif a[:2] == ["agent", "start"]:
     Path(os.environ["FAKE_LOG"] + ".assignment").write_text(a[-1].split("Прочитай задание ")[1].split(" и выполни")[0])
+    if os.environ.get("FAKE_START_GATE"):
+        gate = Path(os.environ["FAKE_START_GATE"])
+        gate.with_suffix(".entered").touch()
+        deadline = time.monotonic() + 6
+        while not gate.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
     time.sleep(float(os.environ.get("FAKE_DELAY", "0")))
     if os.environ.get("FAKE_MIN_TIMEOUT") and ("--timeout" not in a or int(a[a.index("--timeout") + 1]) < int(os.environ["FAKE_MIN_TIMEOUT"])):
         print('{"error":{"code":"timeout","message":"timed out waiting for agent startup"}}', file=sys.stderr)
@@ -90,13 +96,26 @@ elif a[:2] == ["agent", "start"]:
     if os.environ.get("FAKE_FAIL"):
         print("agent_not_ready: процесс мог запуститься", file=sys.stderr)
         sys.exit(1)
+    if os.environ.get("FAKE_START_BAD_JSON"):
+        print("{bad json")
+        sys.exit(0)
     r = {}
 elif a[:2] == ["pane", "current"]:
+    if os.environ.get("FAKE_PROBE_ERROR"):
+        print('{"error":{"code":"timeout"}}', file=sys.stderr)
+        sys.exit(1)
     if os.environ.get("FAKE_PANE_MISSING"):
         print(json.dumps({"error": {"code": "pane_not_found"}}), file=sys.stderr)
         sys.exit(1)
     r = {"pane": {"agent": os.environ.get("FAKE_KIND", "codex") if os.environ.get("FAKE_LIVE") else None}}
 elif a[:2] == ["pane", "read"]:
+    if os.environ.get("FAKE_LATE_ASSIGNMENT"):
+        counter = Path(os.environ["FAKE_LOG"] + ".read-count")
+        count = int(counter.read_text()) + 1 if counter.exists() else 1
+        counter.write_text(str(count))
+        if count == 1:
+            print("agent UI is still starting")
+            sys.exit(0)
     print(Path(os.environ["FAKE_LOG"] + ".assignment").read_text() if os.environ.get("FAKE_AUTO_ASSIGNMENT") else os.environ.get("FAKE_ASSIGNMENT", "unrelated terminal"))
     sys.exit(0)
 else:
@@ -608,6 +627,105 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.cli("notifications"), [])
         calls = self.calls()
         self.assertEqual(sum(c[:2] == ["agent", "start"] for c in calls), 1)
+
+    def test_start_error_before_assignment_becomes_visible(self):
+        self.create()
+        self.env.update(FAKE_FAIL="1", FAKE_LIVE="1", FAKE_AUTO_ASSIGNMENT="1",
+                        FAKE_LATE_ASSIGNMENT="1")
+        result = self.cli("open", "task1")[0]
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            run = self.cli("run", result["run"])
+            if not run["launcher_alive"]:
+                break
+            time.sleep(0.03)
+        self.assertEqual(run["status"], "running")
+        self.assertIn("agent_not_ready", run["startup_error"])
+        for _ in range(2):
+            reopened = self.cli("open", "task1")[0]
+            self.assertEqual(reopened["run"], result["run"])
+            self.assertEqual(reopened["action"], "existing")
+        self.assertEqual(self.cli("notifications"), [])
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 1)
+        self.assertFalse(any(c[:2] == ["agent", "prompt"] for c in self.calls()))
+
+    def wait_launcher(self, key):
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            run = self.cli("run", key)
+            if not run["launcher_alive"]:
+                return run
+            time.sleep(0.03)
+        self.fail("Подготовитель не завершился: " + str(run))
+
+    def test_uncertain_start_is_reconciled_without_duplicate_or_failure(self):
+        for reason in ("unrelated-output", "transport-error", "malformed-start-response"):
+            with self.subTest(reason=reason):
+                key = reason
+                self.create(key)
+                self.env.update(FAKE_FAIL="1", FAKE_LIVE="1")
+                if reason == "transport-error":
+                    self.env["FAKE_PROBE_ERROR"] = "1"
+                elif reason == "malformed-start-response":
+                    self.env.pop("FAKE_FAIL")
+                    self.env["FAKE_START_BAD_JSON"] = "1"
+                opened = self.cli("open", key)[0]
+                run = self.wait_launcher(opened["run"])
+                self.assertEqual(run["status"], "launching")
+                self.assertTrue(run["startup_confirmation_pending"])
+                self.assertTrue(run["startup_error"])
+                self.assertEqual(self.cli("notifications"), [])
+                self.cli("open", key, ok=False)
+                self.env.pop("FAKE_PROBE_ERROR", None)
+                self.env["FAKE_AUTO_ASSIGNMENT"] = "1"
+                recovered = self.cli("open", key)[0]
+                self.assertEqual(recovered["run"], run["id"])
+                self.assertEqual(recovered["action"], "recovered")
+                fresh = self.cli("run", run["id"])
+                self.assertTrue(fresh["agent_start_completed"])
+                self.assertNotIn("startup_confirmation_pending", fresh)
+                self.env.pop("FAKE_AUTO_ASSIGNMENT")
+                self.env.pop("FAKE_START_BAD_JSON", None)
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 3)
+        self.assertFalse(any(c[:2] == ["agent", "prompt"] for c in self.calls()))
+
+    def test_launcher_preserves_worker_transitions_on_success_and_failure(self):
+        for failed in (False, True):
+            for action, expected in (("progress", "running"), ("block", "blocked"), ("finish", "review")):
+                with self.subTest(failed=failed, action=action):
+                    key = action + str(int(failed))
+                    self.create(key)
+                    gate = self.root / (key + ".release")
+                    self.env["FAKE_START_GATE"] = str(gate)
+                    if failed:
+                        self.env["FAKE_FAIL"] = "1"
+                    opened = self.cli("open", key)[0]
+                    deadline = time.monotonic() + 4
+                    while not gate.with_suffix(".entered").exists():
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+                    if action == "progress":
+                        self.cli(action, "--run", opened["run"], "--text", "Работа начата")
+                    elif action == "block":
+                        self.cli(action, "--run", opened["run"], "--question", "Как продолжать?",
+                                 "--checkpoint", "Контекст сохранён")
+                    else:
+                        report = self.root / "report.md"
+                        report.write_text("Проверенный результат")
+                        self.cli(action, "--run", opened["run"], "--report", str(report))
+                    gate.touch()
+                    run = self.wait_launcher(opened["run"])
+                    self.assertEqual(run["status"], expected)
+                    self.assertEqual(self.cli("show", "tasks", key)["status"], expected)
+                    self.assertTrue(run["agent_start_completed"])
+                    if action == "progress":
+                        self.assertEqual(run["progress"], "Работа начата")
+                    elif action == "block":
+                        question = json.loads((self.root / "runs" / run["id"] / "questions.json").read_text())
+                        self.assertEqual(question["question"], "Как продолжать?")
+                    else:
+                        self.assertEqual((self.root / "runs" / run["id"] / "result.md").read_text(), "Проверенный результат")
+        self.assertFalse(any("Не удалось запустить" in n["title"] for n in self.cli("notifications")))
 
     def test_plan_opens_beside_explicit_pane_without_starting_agent(self):
         self.create()

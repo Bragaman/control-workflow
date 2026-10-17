@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 sys.dont_write_bytecode = True
 from completion_git import complete_code, main_branch
@@ -32,6 +33,8 @@ PROJECT_BINDING_FIELDS = ("repositories", "workspace", "workspace_namespace", "l
 STATES = ("backlog", "ready", "running", "blocked", "review", "done", "cancelled")
 HERDR_SESSION = None
 AGENT_START_TIMEOUT_MS = 180000
+START_CONFIRMATION_ATTEMPTS = 3
+START_CONFIRMATION_DELAY = 0.25
 TASK_KINDS = ("research", "reasoning", "planning", "implementation")
 
 
@@ -248,14 +251,46 @@ def require_old_workspace_idle(p, ns, current_run):
             require_executor_absent(old)
 
 
-def confirms_started_agent(r):
+def started_agent_state(r):
+    """Separate confirmed absence from a live or unreachable, unconfirmed agent."""
     check_run_namespace(r)
-    pane = herdr("pane", "current", "--pane", r["pane"],
-                 session=r.get("herdr_session"))["pane"]
+    try:
+        pane = herdr("pane", "current", "--pane", r["pane"],
+                     session=r.get("herdr_session"))["pane"]
+    except HerdrError as exc:
+        if exc.code == "pane_not_found":
+            return "absent"
+        raise
+    if "agent" not in pane:
+        raise ValueError("Herdr не подтвердил состояние исполнителя")
+    if pane["agent"] is None:
+        return "absent"
+    if pane["agent"] != adapter(r).AGENT_KIND:
+        return "unconfirmed"
     transcript = herdr_command("pane", "read", r["pane"], "--source", "recent-unwrapped",
                               "--lines", "120", session=r.get("herdr_session"))
     assignment = str(run_file(r["id"]).parent / "assignment.md")
-    return pane.get("agent") == adapter(r).AGENT_KIND and assignment in transcript
+    return "confirmed" if assignment in transcript else "unconfirmed"
+
+
+def confirms_started_agent(r):
+    return started_agent_state(r) == "confirmed"
+
+
+def reconcile_start(r):
+    # Detection and terminal output can lag behind agent start's error response.
+    # Observe only: never retry start or resend the initial assignment.
+    state = "unknown"
+    for attempt in range(START_CONFIRMATION_ATTEMPTS):
+        if attempt:
+            time.sleep(START_CONFIRMATION_DELAY)
+        try:
+            state = started_agent_state(r)
+        except (ValueError, RuntimeError, subprocess.TimeoutExpired, OSError, KeyError):
+            state = "unknown"
+        if state == "confirmed":
+            break
+    return state
 
 
 def task(key):
@@ -683,23 +718,27 @@ def launch(a):
             update_run(r, task(r["task"]))
         try:
             herdr(*args, timeout=AGENT_START_TIMEOUT_MS / 1000 + 30)
-        except (RuntimeError, subprocess.TimeoutExpired) as exc:
-            # A readiness error can arrive after the initial assignment started.
-            try:
-                confirmed = confirms_started_agent(r)
-            except (ValueError, RuntimeError, subprocess.TimeoutExpired, OSError, KeyError):
-                confirmed = False
-            if not confirmed:
-                raise exc
+        except (RuntimeError, subprocess.TimeoutExpired, ValueError, OSError, KeyError) as exc:
+            state = reconcile_start(r)
             with lock():
-                fresh = current(task(r["task"]), key)
+                t = task(r["task"])
+                fresh = current(t, key)
                 fresh["startup_error"] = str(exc)
-                update_run(fresh, task(r["task"]))
+                # Worker transitions are newer evidence than the start response.
+                worker_reported = fresh["status"] in ("running", "blocked", "review") or bool(fresh.get("progress"))
+                if state != "confirmed" and not worker_reported:
+                    if state == "absent":
+                        raise
+                    fresh["startup_confirmation_pending"] = True
+                    update_run(fresh, t)
+                    return 0
+                update_run(fresh, t)
         with lock():
             fresh = read(run_file(key))
             t = task(r["task"])
             current(t, key)
             fresh["agent_start_completed"] = True
+            fresh.pop("startup_confirmation_pending", None)
             # The agent can block/finish before startup detection returns.
             if fresh["status"] == "launching":
                 fresh["status"] = "running"
@@ -780,6 +819,7 @@ def recover_start(a):
 
 def mark_start_recovered(r, t):
     r["agent_start_completed"] = True
+    r.pop("startup_confirmation_pending", None)
     if "error" in r:
         r["startup_error"] = r.pop("error")
     r["status"] = t["status"] = "running"
