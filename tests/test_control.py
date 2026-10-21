@@ -179,6 +179,120 @@ class ControlTests(unittest.TestCase):
         project["workspace"] = "stale"
         file.write_text(json.dumps(project))
 
+    def test_agent_review_no_code_lifecycle_and_feedback(self):
+        r = self.review()
+        before = len(self.calls())
+        a = self.cli("review-request", "--run", r["id"])
+        self.assertEqual(a["status"], "pending")
+        self.assertEqual(self.cli("review-request", "--run", r["id"])["id"], a["id"])
+        result = self.root / "verdict.json"
+        def conclude(status, findings):
+            result.write_text(json.dumps(dict(version=a["version"], status=status,
+                conclusion="Проверено", findings=findings, suggestions=[], evidence=["Самостоятельная проверка"], limitations=[])))
+            return self.cli("review-conclude", "--run", r["id"], "--id", a["id"], "--actor", "agent1", "--result", str(result))
+        for cycle in range(3):
+            self.cli("review-claim", "--run", r["id"], "--id", a["id"], "--actor", "agent1")
+            self.cli("review-claim", "--run", r["id"], "--id", a["id"], "--actor", "other", ok=False)
+            conclude("changes_requested", ["Исправить критерий"])
+            if cycle == 2:
+                self.cli("review-feedback", "--run", r["id"], "--id", a["id"], ok=False)
+                break
+            msg = self.cli("review-feedback", "--run", r["id"], "--id", a["id"])
+            self.assertTrue(msg["feedback_message"].startswith("task1: "))
+            (self.root / "runs" / r["id"] / "result.md").write_text("Изменено исполнителем до подтверждения")
+            self.cli("review-feedback", "--run", r["id"], "--id", a["id"], "--delivered")
+            self.cli("review-feedback", "--run", r["id"], "--id", a["id"], "--delivered")
+            report = self.root / "new.md"
+            report.write_text("Исправление " + str(cycle))
+            self.cli("finish", "--run", r["id"], "--report", str(report))
+            a = self.cli("review-request", "--run", r["id"])
+        # Review itself never creates herdr tabs or changes the acceptance reviewer.
+        self.assertFalse(any(x[:2] == ["tab", "create"] for x in self.calls()[before:]))
+        self.assertEqual(self.cli("show", "tasks", "task1")["reviewer"], "user")
+
+    def test_agent_review_expiry_staleness_and_policy(self):
+        r = self.review()
+        self.cli("task-set", "task1", "--agent-review-policy", "off")
+        self.cli("review-request", "--run", r["id"], ok=False)
+        self.cli("task-set", "task1", "--agent-review-policy", "manual")
+        a = self.cli("review-request", "--run", r["id"])
+        self.cli("review-claim", "--run", r["id"], "--id", a["id"], "--actor", "lost")
+        f = self.root / "runs" / r["id"] / "agent-review.json"
+        state = json.loads(f.read_text()); state["attempts"][-1]["deadline"] = "2000-01-01T00:00:00+00:00"
+        f.write_text(json.dumps(state))
+        self.assertEqual(self.cli("review-show", "--run", r["id"])["attempts"][-1]["status"], "failed")
+        b = self.cli("review-request", "--run", r["id"])
+        self.assertNotEqual(a["id"], b["id"])
+        self.cli("review-claim", "--run", r["id"], "--id", a["id"], "--actor", "lost", ok=False)
+        self.cli("review-claim", "--run", r["id"], "--id", b["id"], "--actor", "new")
+        result = self.root / "verdict.json"
+        result.write_text(json.dumps(dict(version=b["version"], status="passed", conclusion="OK",
+            findings=[], suggestions=[], evidence=["Проверено"], limitations=[])))
+        (self.root / "runs" / r["id"] / "result.md").write_text("changed")
+        verdict = self.cli("review-conclude", "--run", r["id"], "--id", b["id"], "--actor", "new", "--result", str(result))
+        self.assertEqual(verdict["status"], "failed")
+        self.assertTrue(self.cli("review-show", "--run", r["id"])["attempts"][-1]["stale"])
+        self.assertEqual(self.cli("show", "tasks", "task1")["status"], "review")
+
+    def test_agent_review_code_dirty_untracked_and_passed(self):
+        repo, wt, r = self.code_review()
+        a = self.cli("review-request", "--run", r["id"])
+        self.cli("review-claim", "--run", r["id"], "--id", a["id"], "--actor", "agent")
+        result = self.root / "verdict.json"
+        result.write_text(json.dumps(dict(version=a["version"], status="passed", conclusion="OK",
+            findings=[], suggestions=[], evidence=["Тесты"], limitations=[])))
+        self.assertEqual(self.cli("review-conclude", "--run", r["id"], "--id", a["id"], "--actor", "agent", "--result", str(result))["status"], "passed")
+        self.assertFalse(self.cli("review-show", "--run", r["id"])["attempts"][-1]["stale"])
+        (wt / "new-file").write_text("untracked")
+        self.assertTrue(self.cli("review-show", "--run", r["id"])["attempts"][-1]["stale"])
+        b = self.cli("review-request", "--run", r["id"])
+        self.assertNotEqual(a["version"], b["version"])
+        (wt / "new-file").write_text("dirty")
+        self.cli("review-claim", "--run", r["id"], "--id", b["id"], "--actor", "agent", ok=False)
+
+    def test_agent_review_stale_pending_and_symlink(self):
+        self.create()
+        r = self.start()
+        target = self.root / "target.txt"; target.write_text("outside")
+        link = self.root / "artifact-link"; link.symlink_to(target)
+        report = self.root / "report.md"; report.write_text("Отчёт")
+        self.cli("finish", "--run", r["id"], "--report", str(report), "--artifact", str(link))
+        a = self.cli("review-request", "--run", r["id"])
+        snapshot = json.loads(Path(a["snapshot"]).read_text())
+        self.assertEqual(snapshot["manifest"]["files"][str(link)]["kind"], "symlink")
+        self.assertNotIn(str(target), snapshot["manifest"]["files"])
+        link.unlink(); link.symlink_to(self.root / "different")
+        b = self.cli("review-request", "--run", r["id"])
+        self.assertNotEqual(a["id"], b["id"])
+        self.assertNotEqual(a["version"], b["version"])
+        attempts = self.cli("review-show", "--run", r["id"])["attempts"]
+        self.assertEqual(attempts[0]["status"], "failed")
+        self.assertTrue(attempts[0]["stale"])
+
+    def test_agent_review_corruption_and_late_artifacts(self):
+        r = self.review()
+        artifact = self.root / "late.txt"; artifact.write_text("result")
+        a = self.cli("review-request", "--run", r["id"], "--artifact", str(artifact))
+        frozen = json.loads(Path(a["snapshot"]).read_text())
+        item = frozen["manifest"]["files"][str(artifact)]
+        (Path(a["snapshot"]).parent / item["blob"]).write_text("tampered")
+        self.cli("review-claim", "--run", r["id"], "--id", a["id"], "--actor", "agent", ok=False)
+        self.assertEqual(self.cli("review-show", "--run", r["id"])["attempts"][-1]["status"], "failed")
+        b = self.cli("review-request", "--run", r["id"])
+        self.assertNotEqual(a["id"], b["id"])
+
+    def test_agent_review_auto_finish_artifacts(self):
+        self.create("task1", "--agent-review-policy", "auto")
+        r = self.start()
+        artifact = self.root / "artifact.txt"; artifact.write_text("actual result")
+        report = self.root / "report.md"; report.write_text("Отчёт")
+        out = self.cli("finish", "--run", r["id"], "--report", str(report), "--artifact", str(artifact))
+        self.assertEqual(out["agent_review"]["status"], "pending")
+        snap = json.loads(Path(out["agent_review"]["snapshot"]).read_text())
+        self.assertIn(str(artifact), snap["manifest"]["files"])
+        artifact.write_text("changed")
+        self.assertTrue(self.cli("review-show", "--run", r["id"])["attempts"][-1]["stale"])
+
     def test_execution_profiles_reach_codex_and_run(self):
         cases = (("research", "normal", "fixture-analysis", "medium"),
                  ("research", "complex", "fixture-analysis", "high"),

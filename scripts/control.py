@@ -20,6 +20,7 @@ from completion_git import complete_code, main_branch
 import runtime_config
 import herdr_codex
 import agent_adapters
+import agent_review
 import platform_support
 from artifact_links import relocate_links
 
@@ -395,7 +396,7 @@ def task_create(a):
         t = dict(id=a.id, project=a.project, title=a.title, goal=a.goal,
                  acceptance=a.acceptance, status="backlog", code=a.code,
                  repositories=a.repo, depends=a.depends, reviewer="user", git_mode=a.git_mode or SETTINGS["git_mode"],
-                 active_run=None, runs=[], created_at=now(), updated_at=now())
+                 agent_review_policy=a.agent_review_policy, active_run=None, runs=[], created_at=now(), updated_at=now())
         t.update(execution_profile({**t, "task_kind": a.task_kind, "complexity": a.complexity}))
         save(file, t)
         emit(t)
@@ -406,7 +407,7 @@ def task_set(a):
         t = task(a.id)
         if t["status"] in ("running", "blocked"):
             raise ValueError("Для текущего запуска используйте progress/block/answer/interrupt")
-        for attr in ("title", "goal", "acceptance", "reviewer", "git_mode"):
+        for attr in ("title", "goal", "acceptance", "reviewer", "git_mode", "agent_review_policy"):
             value = getattr(a, attr)
             if value is not None:
                 t[attr] = value
@@ -981,9 +982,18 @@ def finish(a):
         if r["status"] == "launch_failed" and "error" in r:
             r["startup_error"] = r.pop("error")
         r["status"] = t["status"] = "review"
+        if a.artifact is not None:
+            r["review_artifacts"] = [str(Path(p).expanduser().absolute()) for p in a.artifact]
         update_run(r, t)
+        review = None
+        if t.get("agent_review_policy", "manual") == "auto":
+            try:
+                review = agent_review.request(sys.modules[__name__], t, r)
+            except (ValueError, RuntimeError, OSError) as exc:
+                review = {"status": "failed", "error": str(exc)}
+                save(run_file(a.run).parent / "agent-review-error.json", review)
         notification("Готово к приёмке: " + t["title"], str(run_file(a.run).parent / "result.md"), r)
-        emit({"task": t["id"], "status": "review"})
+        emit({"task": t["id"], "status": "review", "agent_review": review})
 
 
 def accept_task(t, r, by, note):
@@ -1246,12 +1256,14 @@ def parser():
     for name, kind in (("projects", "projects"), ("tasks", "tasks")):
         c = cmd(name, listing); c.set_defaults(kind=kind)
         c.add_argument("--project"); c.add_argument("--status", choices=STATES); c.add_argument("--all", action="store_true")
+    agent_review.register(cmd, sys.modules[__name__])
     c = cmd("task-create", task_create)
     c.add_argument("id"); c.add_argument("--project", required=True); c.add_argument("--title", required=True)
     c.add_argument("--goal", required=True); c.add_argument("--acceptance", required=True)
     c.add_argument("--code", action=argparse.BooleanOptionalAction, default=False); c.add_argument("--repo", action="append")
     c.add_argument("--git-mode", choices=("main", "branch"), default=None,
                    help="main: merge и push основной ветки; branch: push отдельной ветки без merge")
+    c.add_argument("--agent-review-policy", choices=("off", "manual", "auto"), default="manual")
     c.add_argument("--depends", action="append", default=[])
     c.add_argument("--task-kind", choices=TASK_KINDS,
                    help="Назначение задачи; без флага определяется по названию")
@@ -1259,6 +1271,7 @@ def parser():
                    help="Сложность для выбора профиля из настроек")
     c = cmd("task-set", task_set)
     c.add_argument("id"); c.add_argument("--title"); c.add_argument("--goal"); c.add_argument("--acceptance")
+    c.add_argument("--agent-review-policy", choices=("off", "manual", "auto"))
     c.add_argument("--reviewer"); c.add_argument("--status", choices=("backlog", "ready", "cancelled"))
     c.add_argument("--code", action=argparse.BooleanOptionalAction, default=None)
     c.add_argument("--repo", action="append")
@@ -1280,6 +1293,7 @@ def parser():
     c = cmd("interrupt", interrupt); c.add_argument("id"); c.add_argument("--reason", required=True)
     c = cmd("finish", finish); c.add_argument("--run", required=True)
     c.add_argument("--report", required=True); c.add_argument("--decisions")
+    c.add_argument("--artifact", action="append", help="Файл или каталог результата для фиксированного снимка ревью")
     c = cmd("accept", accept); c.add_argument("id"); c.add_argument("--by", default="user"); c.add_argument("--note", default="")
     c = cmd("complete", complete); c.add_argument("id")
     c.add_argument("--status", choices=("done", "cancelled"), default="done")
