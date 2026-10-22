@@ -1,4 +1,6 @@
 import json
+import hashlib
+import shutil
 import os
 import shlex
 from pathlib import Path
@@ -178,6 +180,120 @@ class ControlTests(unittest.TestCase):
         project = json.loads(file.read_text())
         project["workspace"] = "stale"
         file.write_text(json.dumps(project))
+
+    def agent_review_changes(self, status="changes_requested"):
+        r = self.review()
+        a = self.cli("review-request", "--run", r["id"])
+        self.cli("review-claim", "--run", r["id"], "--id", a["id"], "--actor", "tester")
+        verdict = self.root / "verdict.json"
+        verdict.write_text(json.dumps(dict(version=a["version"], status=status, conclusion="Нужны исправления",
+            findings=["Исправить ошибку"], suggestions=[], evidence=["Воспроизведено"], limitations=[])))
+        self.cli("review-conclude", "--run", r["id"], "--id", a["id"], "--actor", "tester", "--result", str(verdict))
+        return r, a
+
+    def test_agent_review_fast_finish_before_delivery_ack(self):
+        r, a = self.agent_review_changes()
+        self.cli("task-set", "task1", "--agent-review-policy", "auto")
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"])
+        report = self.root / "fixed.md"; report.write_text("Исправлено")
+        out = self.cli("finish", "--run", r["id"], "--report", str(report))
+        self.assertEqual(out["agent_review"]["status"], "pending")
+        self.assertNotEqual(out["agent_review"]["id"], a["id"])
+        for _ in range(2):
+            self.cli("review-feedback", "--run", r["id"], "--id", a["id"], "--delivered")
+        self.assertEqual(self.cli("show", "tasks", "task1")["status"], "review")
+        self.assertEqual(self.cli("review-show", "--run", r["id"])["attempts"][-1]["status"], "pending")
+
+    def test_agent_review_identical_resubmission_is_new_version(self):
+        r, a = self.agent_review_changes()
+        report = self.root / "identical.md"
+        report.write_bytes((self.root / "runs" / r["id"] / "result.md").read_bytes())
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"])
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"], "--delivered")
+        self.cli("finish", "--run", r["id"], "--report", str(report))
+        # A duplicate preparation after finish must not reopen the same cycle.
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"])
+        self.assertEqual(self.cli("show", "tasks", "task1")["status"], "review")
+        b = self.cli("review-request", "--run", r["id"])
+        self.assertNotEqual(a["id"], b["id"])
+        self.assertNotEqual(a["version"], b["version"])
+        self.assertEqual(b["id"], self.cli("review-request", "--run", r["id"])["id"])
+        self.cli("review-claim", "--run", r["id"], "--id", b["id"], "--actor", "tester")
+
+    def test_agent_review_failed_requires_user_request(self):
+        r, a = self.agent_review_changes(status="failed")
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"], ok=False)
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"], "--user-requested")
+        self.assertEqual(self.cli("show", "tasks", "task1")["status"], "running")
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"], "--delivered")
+        report = self.root / "fixed.md"; report.write_text("Исправлено по поручению")
+        self.cli("finish", "--run", r["id"], "--report", str(report))
+        # Duplicate preparation/ACK cannot reopen a completed submission.
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"], "--user-requested")
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"], "--delivered")
+        self.assertEqual(self.cli("show", "tasks", "task1")["status"], "review")
+
+    def test_agent_review_reservations_limit_without_delivery_ack(self):
+        r, a = self.agent_review_changes()
+        for cycle in range(2):
+            self.cli("review-feedback", "--run", r["id"], "--id", a["id"])
+            self.cli("review-feedback", "--run", r["id"], "--id", a["id"])
+            report = self.root / "same.md"
+            report.write_bytes((self.root / "runs" / r["id"] / "result.md").read_bytes())
+            self.cli("finish", "--run", r["id"], "--report", str(report))
+            a = self.cli("review-request", "--run", r["id"])
+            self.cli("review-claim", "--run", r["id"], "--id", a["id"], "--actor", "tester")
+            verdict = self.root / "verdict.json"
+            verdict.write_text(json.dumps(dict(version=a["version"], status="changes_requested",
+                conclusion="Ошибка осталась", findings=["Исправить ошибку"], suggestions=[], evidence=["Повторено"], limitations=[])))
+            self.cli("review-conclude", "--run", r["id"], "--id", a["id"], "--actor", "tester", "--result", str(verdict))
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"], ok=False)
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"], "--user-requested")
+        self.assertEqual(self.cli("show", "tasks", "task1")["status"], "running")
+
+    def test_agent_review_legacy_prepared_delivery(self):
+        r, a = self.agent_review_changes()
+        directory = self.root / "runs" / r["id"]
+        state = json.loads((directory / "state.json").read_text())
+        state.pop("result_revision")
+        (directory / "state.json").write_text(json.dumps(state))
+        history = json.loads((directory / "agent-review.json").read_text())
+        old = history["attempts"][-1]
+        frozen = json.loads(Path(a["snapshot"]).read_text())
+        frozen["manifest"].pop("submission")
+        old["version"] = frozen["version"] = hashlib.sha256(json.dumps(frozen["manifest"], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        old["result"]["version"] = old["version"]
+        old.pop("submission")
+        old["feedback_message"] = "task1: Старые подготовленные замечания"
+        Path(a["snapshot"]).write_text(json.dumps(frozen))
+        (directory / "agent-review.json").write_text(json.dumps(history))
+        reply = self.cli("review-feedback", "--run", r["id"], "--id", a["id"], "--delivered")
+        self.assertTrue(reply["feedback_migrated"])
+        self.assertEqual(reply["feedback_message"], old["feedback_message"])
+        self.assertEqual(self.cli("show", "tasks", "task1")["status"], "running")
+
+    def test_agent_review_repairs_partial_run_task_write(self):
+        r, a = self.agent_review_changes()
+        scripts = self.root / "fault_scripts"
+        shutil.copytree(SCRIPT.parent, scripts)
+        (self.root / "config").mkdir(exist_ok=True)
+        shutil.copy2(SCRIPT.parents[1] / "config/defaults.json", self.root / "config/defaults.json")
+        injected = scripts / "control.py"
+        text = injected.read_text()
+        wrapper = ("PROGRAM_ROOT = Path(" + repr(str(SCRIPT.parents[1])) + ")\n_original_save = save\n"
+            "def save(file, obj, **kwargs):\n"
+            "    if file.parent.name == 'tasks' and obj.get('status') == 'running':\n"
+            "        raise OSError('injected task-save failure')\n"
+            "    return _original_save(file, obj, **kwargs)\n\n")
+        injected.write_text(text.replace('if __name__ == "__main__":', wrapper + 'if __name__ == "__main__":'))
+        failed = subprocess.run([sys.executable, str(injected), "review-feedback", "--run", r["id"], "--id", a["id"]],
+            env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(failed.returncode, 1, failed.stdout + failed.stderr)
+        self.assertIn("injected task-save failure", failed.stdout)
+        self.assertEqual(self.cli("run", r["id"])["status"], "running")
+        self.assertEqual(self.cli("show", "tasks", "task1")["status"], "review")
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"])
+        self.assertEqual(self.cli("show", "tasks", "task1")["status"], "running")
 
     def test_agent_review_no_code_lifecycle_and_feedback(self):
         r = self.review()

@@ -87,7 +87,7 @@ def snapshot(c, t, r, destination=None):
             for name in ('AGENTS.md', 'CLAUDE.md'):
                 if (parent / name).is_file():
                     capture(parent / name)
-    manifest = dict(task={k: t.get(k) for k in ('id', 'title', 'goal', 'acceptance', 'code', 'project')},
+    manifest = dict(submission=r.get('result_revision', 0), task={k: t.get(k) for k in ('id', 'title', 'goal', 'acceptance', 'code', 'project')},
                     project=project, files=files, repositories=repos,
                     boundaries='Git: tracked и untracked без ignored; внешнее состояние проверяется на момент наблюдения. '
                                'No-code: только result.md и явно переданные --artifact; секреты не включать.')
@@ -167,7 +167,7 @@ passed допустим при проверенных критериях без 
 passed не означает complete, merge или push; reviewer задачи остаётся приёмщиком.
 ''')
     a = dict(id=key, version=frozen['version'], status='pending', created_at=c.now(), packet=str(packet),
-             snapshot=str(dest / 'snapshot.json'))
+             snapshot=str(dest / 'snapshot.json'), submission=r.get('result_revision', 0))
     data['attempts'].append(a)
     persist(c, r, data)
     return a
@@ -198,6 +198,8 @@ def handle(c, args):
         if not data['attempts']:
             raise ValueError('Нет запроса ревью')
         a = data['attempts'][-1]
+        if action == 'review-feedback' and args.delivered:
+            a = next((item for item in data['attempts'] if item['id'] == args.id), a)
         if args.id != a['id']:
             raise ValueError('Ответ относится к другой попытке')
         if action in ('review-claim', 'review-conclude') and (t['status'] != 'review' or r['status'] != 'review'):
@@ -250,32 +252,55 @@ def handle(c, args):
             if stale:
                 a['conclusion'] = 'Результат изменён во время ревью; заключение устарело'
         elif action == 'review-feedback':
-            if a['status'] != 'changes_requested':
-                raise ValueError('Нужны замечания')
-            if a.get('feedback_delivered'):
-                c.emit(a); return
-            if args.delivered:
-                if not a.get('feedback_message'):
-                    raise ValueError('Сначала подготовьте сообщение review-feedback')
-            elif snapshot(c, t, r)['version'] != a['version']:
-                raise ValueError('Нужны актуальные замечания')
-            count = sum(bool(x.get('feedback_delivered')) for x in data['attempts'])
-            if count >= 2:
-                raise ValueError('Лимит двух автоматических циклов; нужен пользователь')
-            message = (t['id'] + ': Исправь только замечания в исходном объёме assignment.md. '
-                       'Спорные требования передай пользователю. Затем finish в том же запуске.\n' +
-                       '\n'.join(a['result']['findings']))
-            a['feedback_message'] = message
-            if args.delivered:
-                if t['status'] != 'review':
-                    raise ValueError('Задача уже не в review')
-                a['feedback_delivered'] = c.now()
-                r['status'] = t['status'] = 'running'
-                c.update_run(r, t)
-            else:
-                a['delivery_required'] = 'Проверь живого исходного исполнителя; отправь ему feedback_message, затем --delivered. При исчезновении спроси пользователя.'
+            feedback(c, t, r, data, a, args)
+            return
         persist(c, r, data)
         c.emit(a)
+
+
+def feedback(c, t, r, data, attempt, args):
+    """Arm the executor before sending; ACK never reopens a finished submission."""
+    if attempt.get('feedback_delivered'):
+        c.emit(attempt)
+        return
+    legacy_prepared = bool(attempt.get('feedback_message') and not attempt.get('feedback_started')
+                           and attempt['status'] == 'changes_requested')
+    if args.delivered and not attempt.get('feedback_started') and not legacy_prepared:
+        raise ValueError('Сначала подготовьте возврат через review-feedback')
+    if not attempt.get('feedback_started'):
+        findings = attempt.get('result', {}).get('findings', [])
+        if not findings or (attempt['status'] != 'changes_requested' and not
+                            (args.user_requested and attempt['status'] == 'failed')):
+            raise ValueError('Нужны замечания; failed возобновляется только по поручению пользователя')
+        if not args.user_requested and not legacy_prepared and snapshot(c, t, r)['version'] != attempt['version']:
+            raise ValueError('Нужны актуальные замечания')
+        count = sum(bool(x.get('feedback_started') or x.get('feedback_delivered')) and
+                    not x.get('feedback_user_requested', False) for x in data['attempts'])
+        if count >= 2 and not args.user_requested:
+            raise ValueError('Лимит двух автоматических циклов; нужен пользователь')
+        if t['status'] != 'review' or r['status'] != 'review':
+            raise ValueError('Задача уже не в review')
+        attempt.update(feedback_started=c.now(), feedback_user_requested=args.user_requested,
+            feedback_message=attempt.get('feedback_message') or
+                (t['id'] + ': Исправь только замечания в исходном объёме assignment.md. '
+                'Спорные требования передай пользователю. Затем finish в том же запуске.\n' + '\n'.join(findings)),
+            delivery_required='Отправь feedback_message исходному живому исполнителю, затем подтверди --delivered. При сбое доставки повтори её или обратись к пользователю; второй исполнитель не создаётся.')
+        if legacy_prepared:
+            attempt['feedback_migrated'] = True
+            attempt['submission'] = r.get('result_revision', 0)
+        # Persist the reservation first so a retry can repair interrupted paired writes.
+        persist(c, r, data)
+    if r.get('result_revision', 0) == attempt.get('submission', 0):
+        if t['status'] not in ('review', 'running') or r['status'] not in ('review', 'running'):
+            raise ValueError('Нельзя возобновить этот запуск')
+        if r.get('feedback_attempt') != attempt['id'] or r['status'] != 'running' or t['status'] != 'running':
+            r['feedback_attempt'] = attempt['id']
+            r['status'] = t['status'] = 'running'
+            c.update_run(r, t)
+    if args.delivered:
+        attempt['feedback_delivered'] = c.now()
+        persist(c, r, data)
+    c.emit(attempt)
 
 
 def register(cmd, c):
@@ -294,6 +319,7 @@ def register(cmd, c):
             parser.add_argument('--result', required=True)
         if name == 'feedback':
             parser.add_argument('--delivered', action='store_true')
+            parser.add_argument('--user-requested', action='store_true', help='Возобновить по явному поручению пользователя, включая failed с замечаниями')
 
 
 def lease_seconds(value):

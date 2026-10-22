@@ -982,6 +982,7 @@ def finish(a):
         if r["status"] == "launch_failed" and "error" in r:
             r["startup_error"] = r.pop("error")
         r["status"] = t["status"] = "review"
+        r["result_revision"] = r.get("result_revision", 0) + 1
         if a.artifact is not None:
             r["review_artifacts"] = [str(Path(p).expanduser().absolute()) for p in a.artifact]
         update_run(r, t)
