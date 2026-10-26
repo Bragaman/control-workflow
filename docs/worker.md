@@ -2,8 +2,8 @@
 
 Выполняй цель и критерии assignment.md. Прочитай проект и сохранённый план
 по [planning.md](planning.md); покажи актуальный план в чате и сохрани до работы.
-Ищи память выборочно через `memory-list --project ID --query 'тема'`, не загружай
-её целиком. При восстановлении сначала читай предыдущий checkpoint, затем
+Ищи память выборочно через `memory-list --project ID --query 'тема' --limit 10`, не загружай
+её целиком. Продолжай выдачу через --offset next_offset или уточняй запрос. При восстановлении сначала читай предыдущий checkpoint, затем
 state.json, questions.json, progress.md и result.md, если они есть.
 
 Используй полную команду control.py из задания с выбранными state/config/bindings:

@@ -191,6 +191,81 @@ class ControlTests(unittest.TestCase):
         self.cli("review-conclude", "--run", r["id"], "--id", a["id"], "--actor", "tester", "--result", str(verdict))
         return r, a
 
+    def test_compact_output_preserves_full_records(self):
+        short = self.create('task1', '--compact')
+        full = self.cli('show', 'tasks', 'task1')
+        self.assertNotIn('acceptance', short)
+        self.assertIn('acceptance', full)
+        self.assertEqual(short['details'], 'show tasks task1')
+        changed = self.cli('task-set', 'task1', '--goal', 'Новая цель', '--compact')
+        self.assertNotIn('goal', changed)
+        self.assertEqual(self.cli('show', 'tasks', 'task1')['goal'], 'Новая цель')
+        r = self.start()
+        self.cli('progress', '--run', r['id'], '--text', 'Проверяется')
+        short = self.cli('run', r['id'], '--compact')
+        self.assertEqual(short['status'], 'running')
+        self.assertIn('progress.md', short['files'])
+        self.assertNotIn('launch_argv', short)
+        self.assertIn('launch_argv', self.cli('run', r['id']))
+
+    def test_memory_pages_include_shared_and_keep_legacy_list(self):
+        for project, title in [('lab', 'Тема один'), ('shared', 'Тема два'), ('lab', 'Другое')]:
+            self.cli('memory-add', '--project', project, '--title', title, '--text', 'Факт')
+        all_rows = self.cli('memory-list', '--project', 'lab', '--query', 'Тема')
+        self.assertIsInstance(all_rows, list)
+        first = self.cli('memory-list', '--project', 'lab', '--query', 'Тема', '--limit', '1')
+        second = self.cli('memory-list', '--project', 'lab', '--query', 'Тема', '--limit', '1', '--offset', str(first['next_offset']))
+        self.assertEqual(first['total'], 2)
+        self.assertIsNone(second['next_offset'])
+        self.assertEqual({m['id'] for m in all_rows}, {m['id'] for m in first['items'] + second['items']})
+        self.cli('memory-list', '--project', 'lab', '--offset', '1', ok=False)
+
+    def test_review_selective_reads_are_frozen_and_verify_hashes(self):
+        r = self.review()
+        a = self.cli('review-request', '--run', r['id'])
+        args = ('--run', r['id'], '--id', a['id'])
+        frozen = json.loads(Path(a['snapshot']).read_text())
+        entry = self.cli('review-read', *args)
+        self.assertEqual(entry['task'], frozen['manifest']['task'])
+        self.assertEqual(self.cli('review-read', *args, '--section', 'manifest'), frozen)
+        files = self.cli('review-read', *args, '--section', 'files')
+        source = str(self.root / 'runs' / r['id'] / 'result.md')
+        expected = (Path(a['snapshot']).parent / files[source]['blob']).read_text()
+        Path(source).write_text('Изменённый живой отчёт')
+        blob = self.cli('review-read', *args, '--section', 'blob', '--path', source)
+        self.assertEqual(blob['content'], expected)
+        self.cli('review-read', *args, '--section', 'blob', '--path', '/outside', ok=False)
+        self.cli('review-read', '--run', r['id'], '--id', 'missing', ok=False)
+        b = self.cli('review-request', '--run', r['id'])
+        latest = self.cli('review-show', '--run', r['id'], '--latest')['attempts']
+        self.assertEqual([x['id'] for x in latest], [b['id']])
+        self.assertEqual(len(self.cli('review-show', '--run', r['id'])['attempts']), 2)
+        (Path(a['snapshot']).parent / files[source]['blob']).write_text('Повреждение')
+        self.cli('review-read', *args, ok=False)
+
+    def test_review_selective_code_diff_binary_and_history_freshness_once(self):
+        repo, wt, r = self.code_review()
+        binary = wt / 'binary'; binary.write_bytes(b'\xff\x00')
+        a = self.cli('review-request', '--run', r['id'])
+        args = ('--run', r['id'], '--id', a['id'])
+        frozen = json.loads(Path(a['snapshot']).read_text())
+        self.assertEqual(self.cli('review-read', *args, '--section', 'diff'), frozen['manifest']['repositories'][0])
+        self.assertIsNone(self.cli('review-read', *args, '--section', 'blob', '--path', str(binary))['content'])
+        self.cli('review-read', *args, '--section', 'diff', '--repository', '-1', ok=False)
+        # Exercise the handler with a fake context: all attempts share one observation.
+        import importlib.util
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+        spec = importlib.util.spec_from_file_location('review_module', SCRIPT.parent / 'agent_review.py')
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        c = MagicMock()
+        c.read.return_value = {'id': r['id'], 'task': 'task1'}
+        history = {'attempts': [dict(id='a', version='v'), dict(id='b', version='old')]}
+        with patch.object(module, 'load', return_value=history), patch.object(module, 'snapshot', return_value={'version': 'v'}) as snap:
+            module.handle(c, SimpleNamespace(run=r['id'], command='review-show', latest=False))
+        snap.assert_called_once()
+        self.assertEqual([x['stale'] for x in history['attempts']], [False, True])
+
     def test_agent_review_fast_finish_before_delivery_ack(self):
         r, a = self.agent_review_changes()
         self.cli("task-set", "task1", "--agent-review-policy", "auto")

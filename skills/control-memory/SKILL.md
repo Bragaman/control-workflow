@@ -5,7 +5,7 @@ description: Найти или сохранить решения, знания �
 
 Если контракт экземпляра ещё не прочитан, читай
 [control-entry.md](../../docs/control-entry.md).
-Ищи выборочно: memory-list --project ID --query 'тема'; команда включает shared.
+Ищи выборочно: memory-list --project ID --query 'тема' --limit 10; команда включает shared.
 Сохраняй решения, проверенные знания и отчёты через memory-add --project ID
 --kind decision|knowledge|work --title '...' --file /path/artifact.md.
 Для общей записи — --project shared. В своём запуске укажи --run RUN_ID;
@@ -16,3 +16,7 @@ description: Найти или сохранить решения, знания �
 Повтор неизменного факта не создаёт новую запись. Секреты не сохраняй.
 finish уже сохраняет отчёт и решения; отдельный memory-add не нужен.
 Относительные Markdown-ссылки из --file пересчитываются при сохранении.
+
+При ограничении ответ содержит items, total и next_offset. Следующую страницу
+читай с тем же query/limit и --offset next_offset; уточняй query по цели.
+Без --limit доступен прежний полный список. Читай тела только выбранных записей.

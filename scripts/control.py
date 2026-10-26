@@ -383,6 +383,14 @@ def project_set(a):
         emit(p)
 
 
+def task_response(t, compact=False):
+    if not compact:
+        return t
+    fields = ('id', 'project', 'title', 'status', 'code', 'active_run', 'task_kind',
+              'complexity', 'model', 'reasoning_effort', 'reviewer', 'agent_review_policy', 'git_mode')
+    return {**{k: t[k] for k in fields if k in t}, 'details': 'show tasks ' + t['id']}
+
+
 def task_create(a):
     with lock():
         read(path("projects", a.project))
@@ -399,7 +407,7 @@ def task_create(a):
                  agent_review_policy=a.agent_review_policy, active_run=None, runs=[], created_at=now(), updated_at=now())
         t.update(execution_profile({**t, "task_kind": a.task_kind, "complexity": a.complexity}))
         save(file, t)
-        emit(t)
+        emit(task_response(t, a.compact))
 
 
 def task_set(a):
@@ -426,7 +434,7 @@ def task_set(a):
             t["status"] = a.status
         t["updated_at"] = now()
         save(path("tasks", a.id), t)
-        emit(t)
+        emit(task_response(t, a.compact))
 
 
 def listing(a):
@@ -797,7 +805,7 @@ def assignment_text(r, t):
 
 Команда панели (из любого cwd): {cli}
 В progress/block/finish/memory-add указывай --run {r['id']}.
-Для памяти: memory-list --project {t['project']} --query 'тема'; читай только нужные записи.
+Для памяти: memory-list --project {t['project']} --query 'тема' --limit 10; читай только нужные записи.
 Для завершения по явному поручению пользователя: {PROGRAM_ROOT / 'skills/control-complete/SKILL.md'}.
 Самостоятельный finish оставляет review.
 """
@@ -950,6 +958,8 @@ def memory_add(a):
 
 
 def memory_list(a):
+    if a.offset and a.limit is None:
+        raise ValueError('--offset требует --limit')
     rows = []
     projects = list(dict.fromkeys(["shared", ident(a.project)]))
     for project in projects:
@@ -957,7 +967,12 @@ def memory_list(a):
             m = read(file)
             if not a.query or a.query.casefold() in (m["title"] + " " + (ROOT / m["file"]).read_text()).casefold():
                 rows.append(m)
-    emit(rows)
+    if a.limit is None:
+        emit(rows)
+    else:
+        rows.sort(key=lambda m: (m.get('created_at', ''), m['id']), reverse=True)
+        emit(dict(items=rows[a.offset:a.offset + a.limit], total=len(rows),
+                  next_offset=a.offset + a.limit if a.offset + a.limit < len(rows) else None))
 
 
 def finish(a):
@@ -1259,6 +1274,7 @@ def parser():
         c.add_argument("--project"); c.add_argument("--status", choices=STATES); c.add_argument("--all", action="store_true")
     agent_review.register(cmd, sys.modules[__name__])
     c = cmd("task-create", task_create)
+    c.add_argument("--compact", action="store_true")
     c.add_argument("id"); c.add_argument("--project", required=True); c.add_argument("--title", required=True)
     c.add_argument("--goal", required=True); c.add_argument("--acceptance", required=True)
     c.add_argument("--code", action=argparse.BooleanOptionalAction, default=False); c.add_argument("--repo", action="append")
@@ -1271,6 +1287,7 @@ def parser():
     c.add_argument("--complexity", choices=("normal", "complex"), default="normal",
                    help="Сложность для выбора профиля из настроек")
     c = cmd("task-set", task_set)
+    c.add_argument("--compact", action="store_true")
     c.add_argument("id"); c.add_argument("--title"); c.add_argument("--goal"); c.add_argument("--acceptance")
     c.add_argument("--agent-review-policy", choices=("off", "manual", "auto"))
     c.add_argument("--reviewer"); c.add_argument("--status", choices=("backlog", "ready", "cancelled"))
@@ -1283,7 +1300,7 @@ def parser():
     c.add_argument("kind", choices=("projects", "tasks")); c.add_argument("id")
     c = cmd("start", start); c.add_argument("id")
     c = cmd("open", open_tasks); c.add_argument("ids", nargs="+")
-    c = cmd("run", run_show); c.add_argument("id")
+    c = cmd("run", run_show); c.add_argument("id"); c.add_argument("--compact", action="store_true")
     c = cmd("plan", plan_view); c.add_argument("id"); c.add_argument("--file"); c.add_argument("--pane")
     c = cmd("recover-start", recover_start); c.add_argument("--run", required=True)
     c = cmd("_launch", launch); c.add_argument("run")
@@ -1305,6 +1322,8 @@ def parser():
     c.add_argument("--run"); group = c.add_mutually_exclusive_group(required=True)
     group.add_argument("--text"); group.add_argument("--file")
     c = cmd("memory-list", memory_list); c.add_argument("--project", required=True); c.add_argument("--query")
+    c.add_argument("--limit", type=positive_int)
+    c.add_argument("--offset", type=nonnegative_int, default=0)
     c = cmd("notifications", lambda a: emit([{"id": p.stem, **read(p)} for p in sorted((ROOT / "notifications").glob("*.json")) if not read(p).get("acknowledged")]))
     c = cmd("notice-ack", notice_ack); c.add_argument("id")
     return p
@@ -1335,6 +1354,20 @@ def pid_alive(pid):
         return True
 
 
+def nonnegative_int(value):
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError('Ожидается неотрицательное число')
+    return number
+
+
+def positive_int(value):
+    number = nonnegative_int(value)
+    if number == 0:
+        raise argparse.ArgumentTypeError('Ожидается положительное число')
+    return number
+
+
 def run_show(a):
     r = read(run_file(a.id))
     request_file = completion_request_file(r)
@@ -1345,7 +1378,16 @@ def run_show(a):
     r["launcher_alive"] = launcher_alive(r)
     r["seconds_since_update"] = int((dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(r["updated_at"])).total_seconds())
     r["note"] = "launcher_alive относится только к подготовителю; состояние исполнителя подтверждается его файлами, а не этим PID"
-    emit(r)
+    if a.compact:
+        fields = ('id', 'task', 'status', 'updated_at', 'pane', 'tab', 'launcher_alive',
+                  'seconds_since_update', 'completion_process_alive', 'error', 'startup_error', 'note')
+        directory = run_file(a.id).parent
+        emit({**{k: r[k] for k in fields if k in r},
+              'files': {name: str(directory / name) for name in
+                        ('progress.md', 'questions.json', 'result.md', 'checkpoint.md')
+                        if (directory / name).exists()}, 'details': 'run ' + a.id})
+    else:
+        emit(r)
 
 
 def main():

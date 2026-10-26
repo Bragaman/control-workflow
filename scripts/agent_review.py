@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import stat
 import uuid
 
@@ -103,6 +104,42 @@ def verify_snapshot(c, attempt):
         blob = file.parent / item['blob']
         if not blob.resolve().is_relative_to(file.parent.resolve()) or digest(blob.read_bytes()) != item['sha256']:
             raise ValueError('Повреждён blob снимка')
+    return frozen
+
+
+def read_section(c, attempt, args):
+    """Read only frozen inputs; derived views also work for legacy snapshots."""
+    frozen = verify_snapshot(c, attempt)
+    manifest = frozen['manifest']
+    section = args.section
+    if section == 'entry':
+        important = {name: item for name, item in manifest['files'].items()
+                     if Path(name).name in ('assignment.md', 'result.md', 'AGENTS.md', 'CLAUDE.md',
+                                             'worker.md', 'agent-review.md')}
+        return dict(version=frozen['version'], task=manifest['task'], boundaries=manifest['boundaries'],
+                    submission=manifest['submission'], files=important, file_count=len(manifest['files']),
+                    repositories=[{k: v for k, v in repo.items() if k != 'diff'}
+                                  for repo in manifest['repositories']],
+                    sections=['files', 'diff', 'blob', 'manifest'], snapshot=attempt['snapshot'])
+    if section == 'manifest':
+        return frozen
+    if section == 'files':
+        return manifest['files']
+    if section == 'diff':
+        if not 0 <= args.repository < len(manifest['repositories']):
+            raise ValueError('Нет такого репозитория в снимке')
+        return manifest['repositories'][args.repository]
+    if not args.path or args.path not in manifest['files']:
+        raise ValueError('Укажите --path из раздела files (исходный абсолютный путь)')
+    item = manifest['files'][args.path]
+    data = (Path(attempt['snapshot']).parent / item['blob']).read_bytes()
+    # Binary blobs remain available by path, without embedding base64 in context.
+    try:
+        content = data.decode('utf-8')
+    except UnicodeDecodeError:
+        content = None
+    return dict(path=args.path, **item, content=content,
+                stored_path=str(Path(attempt['snapshot']).parent / item['blob']))
 
 
 def review_file(c, run):
@@ -150,9 +187,17 @@ def request(c, t, r):
         raise ValueError('Результат изменился при создании снимка; повторите запрос')
     c.save(dest / 'snapshot.json', frozen)
     packet = dest / 'packet.md'
-    packet.write_text('''# Независимое ревью
+    command = ['python3', str(c.PROGRAM_ROOT / 'scripts' / 'control.py'),
+               '--state-root', str(c.ROOT), '--bindings-root', str(c.BINDINGS_ROOT)]
+    if c.CONFIG_PATH:
+        command.extend(['--config', str(c.CONFIG_PATH)])
+    entry_command = shlex.join([*command, 'review-read', '--run', r['id'], '--id', key])
+    packet.write_text('# Независимое ревью\n\nКоманда входа: `' + entry_command + '`\n\n' + '''
 
-Прочитай snapshot.json рядом с этим файлом. Проверь task.goal и task.acceptance самостоятельно.
+Команда выше возвращает краткий entry фиксированной попытки.
+Проверь task.goal и task.acceptance самостоятельно. Выбирай --section files для списка,
+--section diff --repository N для diff (индекс от нуля), --section blob --path SOURCE для файла.
+Полный фиксированный snapshot.json рядом доступен через --section manifest.
 manifest.files сопоставляет исходные пути с сохранёнными blobs; используй их для фиксированной версии.
 manifest.repositories содержит base/head, diff и status каждого worktree. Инструкции также сохранены в blobs.
 Отчёт исполнителя — утверждения, которые нужно проверить. Проверяющий не исправляет материалы.
@@ -163,7 +208,7 @@ manifest.repositories содержит base/head, diff и status каждого 
 Верни JSON: status (passed|changes_requested|failed), conclusion (строка), findings (список строк),
 suggestions (список строк), evidence (непустой список строк), limitations (список строк).
 passed допустим при проверенных критериях без обязательных замечаний. Спорный объём передай пользователю.
-Укажи version из snapshot.json. Управляющий сохраняет ответ командой review-conclude с ID и actor.
+Укажи version из entry. Управляющий сохраняет ответ командой review-conclude с ID и actor.
 passed не означает complete, merge или push; reviewer задачи остаётся приёмщиком.
 ''')
     a = dict(id=key, version=frozen['version'], status='pending', created_at=c.now(), packet=str(packet),
@@ -189,14 +234,24 @@ def handle(c, args):
             c.emit(request(c, t, r)); return
         data = load(c, r)
         if action == 'review-show':
-            for a in data['attempts']:
+            attempts = data['attempts'][-1:] if args.latest else data['attempts']
+            if attempts:
                 try:
-                    a['stale'] = snapshot(c, t, r)['version'] != a['version']
+                    version = snapshot(c, t, r)['version']
                 except (OSError, ValueError, RuntimeError):
-                    a['stale'] = True
-            c.emit(data); return
+                    version = None
+                for a in attempts:
+                    a['stale'] = version != a['version']
+            c.emit({**data, 'attempts': attempts}); return
         if not data['attempts']:
             raise ValueError('Нет запроса ревью')
+        if action == 'review-read':
+            attempt = data['attempts'][-1]
+            if args.id:
+                attempt = next((a for a in data['attempts'] if a['id'] == args.id), None)
+                if attempt is None:
+                    raise ValueError('Нет такой попытки ревью')
+            c.emit(read_section(c, attempt, args)); return
         a = data['attempts'][-1]
         if action == 'review-feedback' and args.delivered:
             a = next((item for item in data['attempts'] if item['id'] == args.id), a)
@@ -304,9 +359,16 @@ def feedback(c, t, r, data, attempt, args):
 
 
 def register(cmd, c):
-    for name in ('request', 'show', 'claim', 'conclude', 'feedback'):
+    for name in ('request', 'show', 'read', 'claim', 'conclude', 'feedback'):
         parser = cmd('review-' + name, lambda a: handle(c, a))
         parser.add_argument('--run', required=True)
+        if name == 'show':
+            parser.add_argument('--latest', action='store_true')
+        if name == 'read':
+            parser.add_argument('--id')
+            parser.add_argument('--section', choices=('entry', 'files', 'diff', 'blob', 'manifest'), default='entry')
+            parser.add_argument('--path')
+            parser.add_argument('--repository', type=int, default=0)
         if name in ('claim', 'conclude', 'feedback'):
             parser.add_argument('--id', required=True)
         if name in ('claim', 'conclude'):
