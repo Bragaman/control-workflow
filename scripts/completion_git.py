@@ -72,7 +72,7 @@ def validate_worktree(item):
     validate_git_operation(wt)
 
 
-def complete_code(task, run, root, persist):
+def complete_code(task, run, root, persist, commit_message=None):
     """Повторяемая транзакция: commit → merge/push → cleanup, без force."""
     if run.get("git_completion", {}).get("status") == "completed":
         return
@@ -91,6 +91,7 @@ def complete_code(task, run, root, persist):
                         and origin and wt["branch"] != base else "merge_main")
                 state["repositories"].append({**wt, "main_branch": base, "origin": origin, "mode": mode})
             checkpoint()
+        message = (commit_message or "").strip()
         # Validate all remaining trees before committing any changes.
         for item in state["repositories"]:
             if item.get("published") and item["mode"] == "push_branch" and not Path(item["path"]).exists():
@@ -101,6 +102,8 @@ def complete_code(task, run, root, persist):
                 checkpoint()
             if not item.get("removed"):
                 validate_worktree(item)
+                if not item.get("commit") and git(item["path"], "status", "--porcelain") and not message:
+                    raise ValueError("Для новых изменений укажите --commit-message с английским описанием сути изменения")
                 if item["mode"] == "merge_main" and item["branch"] != item["main_branch"]:
                     validate_git_operation(item["repository"])
                     if git(item["repository"], "status", "--porcelain"):
@@ -117,13 +120,14 @@ def complete_code(task, run, root, persist):
             else:
                 if git(wt, "status", "--porcelain"):
                     git(wt, "add", "--all")
-                    git(wt, "commit", "-m", "Завершение задачи " + task["id"])
+                    git(wt, "commit", "-m", message)
                 item["commit"] = git(wt, "rev-parse", "HEAD")
                 checkpoint()
             if not item.get("published"):
                 if item["mode"] == "merge_main" and item["branch"] != item["main_branch"]:
                     try:
-                        git(repo, "merge", "--no-edit", item["commit"])
+                        subject = git(wt, "log", "-1", "--format=%s", item["commit"])
+                        git(repo, "merge", "--no-edit", "-m", "Merge: " + subject, item["commit"])
                     except RuntimeError:
                         if git(repo, "rev-parse", "--verify", "MERGE_HEAD", optional=True):
                             git(repo, "merge", "--abort")

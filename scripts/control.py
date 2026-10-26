@@ -1062,7 +1062,7 @@ def queue_completion(a, r):
     file = completion_request_file(r)
     request = dict(token=uuid.uuid4().hex, run=r["id"], task=a.id,
                    status="pending", requested_at=now(), by=a.by, note=a.note,
-                   target_status=a.status)
+                   target_status=a.status, commit_message=a.commit_message)
     save(file, request)
     env = runtime_config.child_environment(ROOT, BINDINGS_ROOT, CONFIG_PATH)
     # The child is independent of the terminal being closed and uses explicit IDs.
@@ -1099,7 +1099,8 @@ def complete_request(a):
         try:
             current(task(r["task"]), a.run)
             args = argparse.Namespace(id=r["task"], status=request["target_status"],
-                                      by=request["by"], note=request["note"])
+                                      by=request["by"], note=request["note"],
+                                      commit_message=request.get("commit_message"))
             result = complete_locked(args)
             request["status"] = "failed" if result else "completed"
             if result:
@@ -1139,7 +1140,8 @@ def complete(a):
                 if not file.exists() or read(file)["status"] not in ("pending", "running"):
                     save(file, dict(token=uuid.uuid4().hex, run=r["id"], task=a.id,
                                     status="failed", target_status=a.status, by=a.by,
-                                    note=a.note, requested_at=now(), finished_at=now(),
+                                    note=a.note, commit_message=a.commit_message,
+                                    requested_at=now(), finished_at=now(),
                                     error=str(exc)))
             raise
 
@@ -1180,7 +1182,8 @@ def complete_locked(a):
 
     if r and a.status == "done":
         try:
-            complete_code(t, r, run_file(r["id"]).parent, lambda: update_run(r, t))
+            complete_code(t, r, run_file(r["id"]).parent, lambda: update_run(r, t),
+                          commit_message=a.commit_message)
         except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
             emit({"task": t["id"], "status": t["status"], "git_completion": r["git_completion"],
                   "next": "Код и таб сохранены; устраните причину и повторите complete"})
@@ -1316,6 +1319,7 @@ def parser():
     c = cmd("complete", complete); c.add_argument("id")
     c.add_argument("--status", choices=("done", "cancelled"), default="done")
     c.add_argument("--by", default="user"); c.add_argument("--note", default="")
+    c.add_argument("--commit-message", help="Английское описание сути изменения для нового коммита")
     c = cmd("_complete-request", complete_request); c.add_argument("run"); c.add_argument("token")
     c = cmd("memory-add", memory_add); c.add_argument("--project", required=True)
     c.add_argument("--title", required=True); c.add_argument("--kind", choices=("decision", "knowledge", "work"), default="knowledge")

@@ -1243,15 +1243,42 @@ class ControlTests(unittest.TestCase):
         self.cli("finish", "--run", r["id"], "--report", str(report))
         return repo, wt, r
 
+    def test_complete_requires_message_before_staging_and_can_retry(self):
+        repo, wt, r = self.code_review()
+        before = self.git(wt, "rev-parse", "HEAD")
+        status = self.git(wt, "status", "--porcelain")
+        for args in ((), ("--commit-message", "   ")):
+            result = self.cli("complete", "task1", *args, ok=False)
+            self.assertEqual(result["status"], "review")
+            self.assertIn("--commit-message", result["git_completion"]["error"])
+            self.assertEqual(self.git(wt, "rev-parse", "HEAD"), before)
+            self.assertEqual(self.git(repo, "rev-parse", "HEAD"), before)
+            self.assertEqual(self.git(wt, "status", "--porcelain"), status)
+            self.assertFalse(any(c[:2] == ["tab", "close"] for c in self.calls()))
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
+        self.assertEqual(self.git(repo, "log", "-1", "--format=%s"),
+                         "Update example content and add task artifact")
+
+    def test_complete_keeps_existing_commit_without_message(self):
+        repo, wt, r = self.code_review()
+        self.git(wt, "add", "--all")
+        self.git(wt, "commit", "-m", "Update example content and add task artifact")
+        before = self.git(wt, "rev-parse", "HEAD")
+        self.cli("complete", "task1")
+        self.assertEqual(self.git(repo, "rev-parse", "HEAD"), before)
+        self.assertEqual(self.git(wt, "rev-parse", "HEAD"), before)
+
     def test_complete_without_origin_commits_and_merges_main(self):
         repo, wt, r = self.code_review()
-        result = self.cli("complete", "task1")
+        result = self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
         self.assertEqual(result["status"], "done")
         self.assertEqual((repo / "example.txt").read_text(), "task change")
         self.assertEqual((repo / "added.txt").read_text(), "task artifact")
         self.assertEqual(self.git(repo, "status", "--porcelain"), "")
         self.assertTrue(wt.exists())
         head = self.git(repo, "rev-parse", "HEAD")
+        self.assertEqual(self.git(repo, "log", "-1", "--format=%s"),
+                         "Update example content and add task artifact")
         self.cli("complete", "task1")
         self.assertEqual(self.git(repo, "rev-parse", "HEAD"), head)
         self.assertTrue((self.root / "runs" / r["id"] / "git-completion.md").exists())
@@ -1259,7 +1286,7 @@ class ControlTests(unittest.TestCase):
     def test_complete_origin_pushes_feature_without_local_merge_removes_worktree(self):
         repo, wt, r = self.code_review(remote=True)
         before = self.git(repo, "rev-parse", "HEAD")
-        self.cli("complete", "task1")
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
         branch = r["worktrees"][0]["branch"]
         origin = self.root / "origin.git"
         feature = self.git(origin, "rev-parse", "refs/heads/" + branch)
@@ -1269,14 +1296,14 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.git(origin, "show", branch + ":example.txt"), "task change")
         self.assertFalse(wt.exists())
         self.assertTrue((self.root / "runs" / r["id"] / "result.md").exists())
-        self.cli("complete", "task1")
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
 
     def test_complete_push_rejection_retains_worktree_and_review_then_retries(self):
         repo, wt, r = self.code_review(remote=True)
         hook = self.root / "origin.git" / "hooks" / "pre-receive"
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
-        result = self.cli("complete", "task1", ok=False)
+        result = self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact", ok=False)
         self.assertEqual(result["status"], "review")
         self.assertEqual(result["git_completion"]["status"], "failed")
         self.assertTrue(wt.exists())
@@ -1291,7 +1318,7 @@ class ControlTests(unittest.TestCase):
         repo, wt, r = self.code_review()
         (repo / "example.txt").write_text("user edit")
         before = self.git(wt, "rev-parse", "HEAD")
-        self.cli("complete", "task1", ok=False)
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact", ok=False)
         self.assertEqual(self.git(wt, "rev-parse", "HEAD"), before)
         self.assertEqual((repo / "example.txt").read_text(), "user edit")
         self.assertEqual((wt / "example.txt").read_text(), "task change")
@@ -1302,7 +1329,9 @@ class ControlTests(unittest.TestCase):
         (repo / "other.txt").write_text("parallel change")
         self.git(repo, "add", ".")
         self.git(repo, "commit", "-m", "parallel")
-        self.cli("complete", "task1")
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
+        self.assertEqual(self.git(repo, "log", "-1", "--format=%s"),
+                         "Merge: Update example content and add task artifact")
         self.assertEqual((repo / "other.txt").read_text(), "parallel change")
         self.assertEqual((repo / "example.txt").read_text(), "task change")
 
@@ -1312,7 +1341,7 @@ class ControlTests(unittest.TestCase):
         self.git(repo, "add", ".")
         self.git(repo, "commit", "-m", "parallel conflicting")
         before = self.git(repo, "rev-parse", "HEAD")
-        self.cli("complete", "task1", ok=False)
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact", ok=False)
         self.assertEqual(self.git(repo, "rev-parse", "HEAD"), before)
         self.assertEqual(self.git(repo, "status", "--porcelain"), "")
         self.assertTrue(wt.exists())
@@ -1328,14 +1357,14 @@ class ControlTests(unittest.TestCase):
         state = json.loads(state_file.read_text())
         state["worktrees"][0]["branch"] = "main"
         state_file.write_text(json.dumps(state))
-        self.cli("complete", "task1")
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
         self.assertEqual(self.git(self.root / "origin.git", "show", "main:example.txt"), "task change")
         self.assertTrue(wt.exists())
         self.assertEqual(self.cli("run", r["id"])["git_completion"]["status"], "completed")
 
     def test_complete_temporary_branch_merges_main_and_pushes_origin(self):
         repo, wt, r = self.code_review(remote=True, git_mode="main")
-        self.cli("complete", "task1")
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
         self.assertEqual((repo / "example.txt").read_text(), "task change")
         self.assertEqual(self.git(self.root / "origin.git", "rev-parse", "main"), self.git(repo, "rev-parse", "HEAD"))
         refs = self.git(self.root / "origin.git", "for-each-ref", "--format=%(refname)")
@@ -1346,7 +1375,7 @@ class ControlTests(unittest.TestCase):
         repo, wt, r = self.code_review(remote=True)
         self.cli("task-set", "task1", "--git-mode", "main")
         self.assertEqual(self.cli("show", "tasks", "task1")["git_mode"], "main")
-        self.cli("complete", "task1")
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
         self.assertEqual((repo / "example.txt").read_text(), "task change")
 
     def test_two_main_tasks_from_same_base_merge_and_push_both(self):
@@ -1356,8 +1385,8 @@ class ControlTests(unittest.TestCase):
         second_tree = Path(second["worktrees"][0]["path"])
         (second_tree / "second.txt").write_text("second task")
         self.cli("finish", "--run", second["id"], "--report", str(self.root / "report.md"))
-        self.cli("complete", "task1")
-        self.cli("complete", "task2")
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
+        self.cli("complete", "task2", "--commit-message", "Add second task file")
         self.assertEqual((repo / "example.txt").read_text(), "task change")
         self.assertEqual((repo / "second.txt").read_text(), "second task")
         self.assertEqual(self.git(self.root / "origin.git", "rev-parse", "main"), self.git(repo, "rev-parse", "HEAD"))
@@ -1373,13 +1402,13 @@ class ControlTests(unittest.TestCase):
 
     def test_complete_recovers_removed_tree_before_checkpoint(self):
         repo, wt, r = self.code_review(remote=True)
-        self.cli("complete", "task1")
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
         state_file = self.root / "runs" / r["id"] / "state.json"
         state = json.loads(state_file.read_text())
         state["git_completion"]["status"] = "pending"
         state["git_completion"]["repositories"][0]["removed"] = False
         state_file.write_text(json.dumps(state))
-        self.cli("complete", "task1")
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
         self.assertTrue(self.cli("run", r["id"])["git_completion"]["repositories"][0]["removed"])
 
     def test_complete_rejects_edited_tree_after_failed_push(self):
@@ -1387,10 +1416,10 @@ class ControlTests(unittest.TestCase):
         hook = self.root / "origin.git" / "hooks" / "pre-receive"
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
-        self.cli("complete", "task1", ok=False)
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact", ok=False)
         hook.unlink()
         (wt / "example.txt").write_text("edit after checkpoint")
-        self.cli("complete", "task1", ok=False)
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact", ok=False)
         self.assertTrue(wt.exists())
         self.assertEqual(self.cli("show", "tasks", "task1")["status"], "review")
 
@@ -1399,14 +1428,14 @@ class ControlTests(unittest.TestCase):
         hook = self.root / "origin.git" / "hooks" / "pre-receive"
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
-        self.cli("complete", "task1", ok=False)
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact", ok=False)
         self.cli("task-set", "task1", "--git-mode", "main")
         hook.unlink()
-        self.cli("complete", "task1", ok=False)
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact", ok=False)
         self.assertTrue(wt.exists())
         self.assertEqual((repo / "example.txt").read_text(), "original")
         self.cli("task-set", "task1", "--git-mode", "branch")
-        self.cli("complete", "task1")
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
         self.assertFalse(wt.exists())
 
     def test_complete_preserves_users_unfinished_merge_in_main(self):
@@ -1421,7 +1450,7 @@ class ControlTests(unittest.TestCase):
         self.git(repo, "reset", "HEAD", "--", "other.txt")
         (repo / "other.txt").unlink()
         merge_head = self.git(repo, "rev-parse", "MERGE_HEAD")
-        self.cli("complete", "task1", ok=False)
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact", ok=False)
         self.assertEqual(self.git(repo, "rev-parse", "MERGE_HEAD"), merge_head)
 
     def test_complete_failure_retains_status_and_can_retry(self):
@@ -1482,7 +1511,7 @@ class ControlTests(unittest.TestCase):
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
         self.env["HERDR_PANE_ID"] = "w7:p1"
-        self.cli("complete", "task1")
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
         self.wait_completion(r, "failed")
         self.assertTrue(wt.exists())
         self.assertEqual(self.cli("show", "tasks", "task1")["status"], "review")
@@ -1495,12 +1524,14 @@ class ControlTests(unittest.TestCase):
     def test_complete_own_tab_main_merges_and_pushes(self):
         repo, wt, r = self.code_review(remote=True, git_mode="main")
         self.env["HERDR_PANE_ID"] = "w7:p1"
-        self.cli("complete", "task1")
+        self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
         self.wait_completion(r)
         self.assertEqual((repo / "example.txt").read_text(), "task change")
         self.assertEqual(self.git(self.root / "origin.git", "rev-parse", "main"),
                          self.git(repo, "rev-parse", "HEAD"))
         self.assertEqual(self.cli("run", r["id"])["completion_request"]["status"], "completed")
+        self.assertEqual(self.git(repo, "log", "-1", "--format=%s"),
+                         "Update example content and add task artifact")
 
     def test_complete_own_tab_changed_namespace_refused(self):
         r = self.review()
