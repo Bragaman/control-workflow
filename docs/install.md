@@ -1,39 +1,107 @@
 # Установка и обновление
 
-Нужны Python 3.10+ и POSIX (Linux/macOS). Для исполнителей установи herdr и
-авторизуй Codex или Claude Code штатным способом. Git нужен для --code.
-Программа и CLI агента работают на одной машине и локальной файловой системе.
-Версии для приёмки с реальным CLI фиксируются по docs/compatibility.md.
+Нужны Python 3.10+, Git для задач с кодом и локальная POSIX-система.
+Программа, herdr и CLI агента работают на одной машине. Границы проверенной
+поддержки перечислены в [матрице](compatibility.md).
 
-## Новый экземпляр
+## Зависимости
 
-1. Проверь distribution.json командой python3 scripts/release_audit.py.
-2. Установи в отдельный каталог: python3 scripts/install.py --prefix /path/program.
-3. Создай собственный JSON по examples/config-codex.json или config-claude.json.
-   Назначение и сложность выбирают профиль; model=default оставляет модель CLI.
-   Для иного профиля задай доступную твоей учётной записи модель.
-4. Выбери отдельные state и bindings. Проверь их командой doctor.py с теми же
-   --state-root, --config и --bindings-root. Doctor создаёт выбранные каталоги,
-   проверяет запись временным файлом; credentials не читает. Без --herdr-session
-   он не обращается к серверу.
-5. Подключи скиллы из установленного каталога:
+Установи herdr по [официальной инструкции](https://herdr.dev/docs/install/).
+Для Linux/macOS она предлагает установщик или пакетный менеджер. Вариант
+с загрузкой скрипта позволяет сначала просмотреть его:
 
 ```sh
-python3 /path/program/scripts/install_skills.py --destination /path/manager/.agents/skills
-python3 /path/program/scripts/install_skills.py --destination /path/manager/.claude/skills
+curl -fsSL https://herdr.dev/install.sh -o /tmp/herdr-install.sh
+less /tmp/herdr-install.sh
+sh /tmp/herdr-install.sh
+herdr --version
 ```
 
-Укажи подходящий каталог выбранного агента. Глобальную установку выполняй
-только при необходимости; установщик всегда требует явный destination.
-Проверь --action check и начни новую сессию агента. Для Claude каталог
-[.claude/skills](https://code.claude.com/docs/en/skills) — штатное подключение.
-При чтении ссылок из SKILL.md разрешай их относительно физического исходника
-после разрешения symlink. AGENTS.md и CLAUDE.md не перезаписываются.
+Установи Codex CLI и пройди вход по
+[официальной инструкции OpenAI](https://learn.chatgpt.com/docs/codex/cli).
+Перед первым запуском панели проверь, что команда codex доступна в PATH и
+интерактивный codex открывается с твоей учётной записью. Авторизация хранится
+вне state панели. Для Claude Code используй его штатную установку и вход;
+цикл с реальным CLI этого адаптера пока не принят.
+
+## Новый экземпляр с Codex
+
+Начни в корне проверенного checkout control-workflow. Команды ниже используют
+новые каталоги; если они уже заняты, выбери другие. В одной оболочке выполни:
+
+```sh
+export CW_PROGRAM="$HOME/.local/share/control-workflow/program"
+export CW_STATE="$HOME/.local/state/control-workflow-demo"
+export CW_BINDINGS="$HOME/.local/state/control-workflow-demo-bindings"
+export CW_CONFIG="$HOME/.config/control-workflow-demo/config.json"
+export CW_MANAGER="$HOME/control-workflow-manager-demo"
+python3 scripts/release_audit.py
+python3 scripts/install.py --prefix "$CW_PROGRAM"
+mkdir -p "$(dirname "$CW_CONFIG")" "$CW_MANAGER"
+cp "$CW_PROGRAM/examples/config-codex.json" "$CW_CONFIG"
+python3 "$CW_PROGRAM/scripts/doctor.py" --state-root "$CW_STATE" --bindings-root "$CW_BINDINGS" --config "$CW_CONFIG"
+python3 "$CW_PROGRAM/scripts/control.py" --state-root "$CW_STATE" --bindings-root "$CW_BINDINGS" --config "$CW_CONFIG" environment
+```
+
+Проверь выбранные пути в environment и found в выводе doctor. Doctor создаёт
+state и bindings и проверяет запись временным файлом; без --herdr-session он
+не обращается к серверу. Он не проверяет авторизацию или доступность модели.
+Пример config использует model=default — выбор модели остаётся за CLI.
+Назначение и сложность задачи выбирают профиль; для своей модели измени config.
+
+Подключи восемь скиллов управляющего:
+
+```sh
+python3 "$CW_PROGRAM/scripts/install_skills.py" --destination "$CW_MANAGER/.agents/skills"
+python3 "$CW_PROGRAM/scripts/install_skills.py" --destination "$CW_MANAGER/.agents/skills" --action check
+```
+
+[Codex обнаруживает .agents/skills и следует symlink](https://learn.chatgpt.com/docs/build-skills).
+Для Claude используй .claude/skills в каталоге управляющего и пример
+config-claude.json: [инструкция Claude Code](https://code.claude.com/docs/en/skills).
+Установщик не перезаписывает AGENTS.md и CLAUDE.md; чужие файлы или ссылки
+блокируют операцию. При чтении ссылок из SKILL.md разрешай их относительно
+физического исходника после разрешения symlink.
+
+Создай именованную сессию herdr из каталога управляющего:
+
+```sh
+cd "$CW_MANAGER"
+herdr --session control-workflow-demo
+```
+
+Это интерактивная команда: в herdr 0.9.3 она создаёт сессию, если её ещё нет,
+или подключается к существующей. Синтаксис описан в
+[CLI herdr](https://herdr.dev/docs/cli-reference/).
+В открывшейся оболочке запусти codex из каталога управляющего и отправь запрос,
+заменив все /absolute/path реальными абсолютными путями из environment:
+
+```text
+Управляй экземпляром control-workflow:
+программа /absolute/path/program/scripts/control.py,
+--state-root /absolute/path/state,
+--bindings-root /absolute/path/bindings,
+--config /absolute/path/config.json,
+--herdr-session control-workflow-demo.
+Прочитай /absolute/path/program/docs/control-entry.md.
+Используй $control-list и покажи задачи. Новые задачи пока не запускай.
+```
+
+Скилл не выбирает экземпляр. Управляющий должен использовать полный путь
+программы и эти параметры перед каждой подкомандой. Проверить имя сессии можно
+через herdr session list; явный --herdr-session нужен при вызове вне herdr.
+Если скиллы не появились, перезапусти Codex. Абсолютный путь к SKILL.md позволяет
+прочитать инструкцию вручную, но не регистрирует команду.
+
+Далее выполни [синтетический цикл](../examples/task.md) в выбранном экземпляре.
+Программная установка, конфигурация, ссылки скиллов и создание записей проверены
+в новом временном окружении. Загрузка зависимостей и интерактивный вход на пустой
+машине не проверялись; полный цикл с реальным CLI ограничен матрицей поддержки.
 
 ## Обновление
 
-Останови запуск новых задач и дождись отсутствия подготовителей/complete;
-работающие исполнители должны закончить текущий ход. Запусти install.py из нового
+Останови запуск новых задач. Дождись завершения команд запуска и приёмки,
+а также текущего хода каждого работающего исполнителя. Запусти install.py из нового
 проверенного checkout с прежним --prefix. Состояние и config не переносится.
 Установщик сверяет хеши прежних управляемых файлов, отказывает при чужих файлах
 или ручных изменениях, готовит новую копию и сохраняет старую в backup,
@@ -58,10 +126,10 @@ python3 /path/program/scripts/install_skills.py --destination /path/manager/.cla
 в Claude Code — `/control-list` в начале сообщения. Обычный запрос тоже
 поддерживается: описания оставлены для автоматического выбора. Если скилл
 не зарегистрирован, укажи агенту прочитать его SKILL.md по абсолютному пути;
-это чтение инструкции, а не регистрация команды.
+команда при этом не регистрируется.
 
 Тело загружается при выборе скилла; явное имя само по себе не убирает каталог
-из контекста. Установку и state укажи в запросе; имя скилла их не выбирает.
+из контекста. Установку и state укажи в запросе.
 Уже прочитанный общий документ не перечитывай без изменения экземпляра или
 необходимости восстановить контекст. Ссылки внутри скилла читай по их условиям.
 

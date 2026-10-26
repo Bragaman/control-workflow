@@ -14,7 +14,7 @@ SCRIPTS = ('control', 'completion_git', 'install_skills', 'artifact_links', 'her
 DOCS = ('worker', 'planning', 'control-entry', 'git-policy', 'recovery', 'runtime-layout',
         'agent-review', 'install', 'architecture', 'compatibility', 'questions', 'task-profile')
 SKILLS = ('list', 'project', 'task', 'start', 'review', 'complete', 'memory', 'sync')
-ALLOWLIST = ({'README.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE.pending', '.gitignore',
+ALLOWLIST = ({'README.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', '.gitignore',
               'config/defaults.json', 'examples/config-codex.json', 'examples/config-claude.json',
               'examples/project.json', 'examples/task.md', '.github/workflows/check.yml',
               'skills/control-sync/references/checks.md'} |
@@ -22,6 +22,8 @@ ALLOWLIST = ({'README.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE.pending', '.gitign
              {'docs/' + name + '.md' for name in DOCS} |
              {'skills/control-' + name + '/SKILL.md' for name in SKILLS} |
              {'tests/test_' + name + '.py' for name in ('control', 'runtime', 'public')})
+# The original license placeholder remains valid only in preserved historical trees.
+HISTORY_ALLOWLIST = ALLOWLIST | {'LICENSE.pending'}
 PRIVATE = re.compile(r'/home/(?:dm|[a-z][a-z0-9_-]*)/|run-[a-f0-9]{12}|'
                      r'-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----|'
                      r'\bAKIA[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{24,}')
@@ -85,13 +87,13 @@ def main():
         commits = subprocess.check_output(['git', '-C', str(root), 'rev-list', '--all'], text=True).splitlines()
         for commit in commits:
             names = subprocess.check_output(['git', '-C', str(root), 'ls-tree', '-r', '--name-only', commit], text=True).splitlines()
-            if set(names) - ALLOWLIST - {'distribution.json'}:
+            if set(names) - HISTORY_ALLOWLIST - {'distribution.json'}:
                 raise ValueError('Посторонние пути в истории ' + commit)
             for name in names:
                 inspect(name, subprocess.check_output(['git', '-C', str(root), 'show', commit + ':' + name]))
     print(json.dumps({'files': len(files), 'skills': len(SKILLS), 'symlinks': 0,
                       'history_commits_checked': len(commits), 'privacy_pattern_matches': 0,
-                      'local_links': 'passed', 'license': 'pending'}, ensure_ascii=False))
+                      'local_links': 'passed', 'license': 'MIT'}, ensure_ascii=False))
 
 
 if __name__ == '__main__':

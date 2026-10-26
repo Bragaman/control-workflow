@@ -152,4 +152,14 @@ class PublicInstallTests(unittest.TestCase):
             self.assertEqual(config, self.root / 'Library/Application Support/control-workflow/config.json')
 
     def test_distribution_audit(self):
-        self.call(ROOT / 'scripts/release_audit.py')
+        result = json.loads(self.call(ROOT / 'scripts/release_audit.py').stdout)
+        self.assertEqual(result['license'], 'MIT')
+
+    def test_installed_audit_rejects_historical_license_placeholder(self):
+        prefix = self.root / 'program'
+        self.call(ROOT / 'scripts/install.py', '--prefix', prefix)
+        result = json.loads(self.call(prefix / 'scripts/release_audit.py').stdout)
+        self.assertEqual(result['license'], 'MIT')
+        (prefix / 'LICENSE.pending').write_text('Historical placeholder')
+        rejected = self.call(prefix / 'scripts/release_audit.py', ok=False)
+        self.assertIn('LICENSE.pending', rejected.stderr)
