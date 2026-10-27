@@ -108,47 +108,6 @@ fn validate_manifest(root: &Path) -> Result<Value> {
     walk(root, root, files)?;
     Ok(m)
 }
-fn resource_text(name: &str, text: &str) -> String {
-    if name == "docs/install.md" {
-        return include_str!("../docs/rust.md").into();
-    }
-    if name == "docs/compatibility.md" {
-        return "# Проверка Rust-версии\n\nЦелевая матрица: Linux/macOS на x86_64 и ARM64, адаптеры Codex и Claude. Наличие сборки или CI не подтверждает полный цикл с реальным агентом. Перед миграцией проверьте нужную платформу и адаптер в отдельной herdr-сессии с отдельными state/config/bindings.\n\nОбязательные сценарии: open и повторный/конкурентный open; progress; block/checkpoint/answer; finish; review; пользовательская приёмка complete и закрытие собственного таба; worktree; Git main/branch с origin и без него; отказ push и merge conflict; неизвестный ответ start/create и восстановление без повторной отправки. Проверяйте обнаружение восьми скиллов и доступ к дополнительным каталогам.\n\nСборка и автоматические проверки: [Rust CLI и MCP](rust.md). Результаты конкретного прогона, версии интеграций и ограничения сохраняйте вне исходников в отчёте запуска. Python-результаты прежнего выпуска не являются проверкой Rust.\n".into();
-    }
-    let re = regex::Regex::new(r"(?:/usr/bin/)?python3 ([^\s`]*?)scripts/control\.py").unwrap();
-    let text = re.replace_all(text, "${1}bin/control-workflow");
-    let mut text = text.replace("scripts/control.py", "bin/control-workflow");
-    if name == "docs/architecture.md" {
-        for (old, new) in [
-            ("runtime_config.py", "src/config.rs"),
-            ("agent_adapters.py", "src/external.rs"),
-            ("herdr_codex.py", "src/external.rs"),
-            ("herdr_claude.py", "src/external.rs"),
-            ("platform_support.py", "src/external.rs"),
-            ("completion_git.py", "src/git.rs"),
-            ("artifact_links.py", "src/core.rs"),
-        ] {
-            text = text.replace(old, new);
-        }
-        text.push_str("\nCLI и MCP stdio вызывают общее Rust-ядро (src/core.rs); Python в рабочем пути отсутствует. Имена src относятся к исходному checkout.\n");
-    }
-    if name == "docs/runtime-layout.md" {
-        text = text
-            .replace(
-                "scripts/, config/defaults.json",
-                "bin/, config/defaults.json",
-            )
-            .replace(
-                "Физический путь control.py",
-                "Физический путь bin/control-workflow",
-            )
-            .replace(
-                "CHILD получает выбранные state/config/bindings\nчерез окружение",
-                "Дочерний процесс получает выбранные state/config/bindings\nявными аргументами",
-            );
-    }
-    text
-}
 pub fn install(c: &Context, prefix: &str, package: bool) -> Result<Value> {
     let requested = crate::config::absolute(prefix)?;
     ensure!(!requested.is_symlink(), "prefix не должен быть symlink");
@@ -187,14 +146,14 @@ pub fn install(c: &Context, prefix: &str, package: bool) -> Result<Value> {
         true,
     )?;
     for (name, text) in resources::FILES {
-        write(name, resource_text(name, text).as_bytes(), false)?;
+        write(name, text.as_bytes(), false)?;
     }
     write(
         "config/defaults.json",
         include_bytes!("../config/defaults.json"),
         false,
     )?;
-    write("README.md", include_bytes!("../docs/rust.md"), false)?;
+    write("README.md", include_bytes!("../README.md"), false)?;
     write("LICENSE", include_bytes!("../LICENSE"), false)?;
     store::save_raw(
         &stage.path().join("distribution-rust.json"),

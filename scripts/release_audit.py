@@ -32,6 +32,8 @@ NATIVE_FILES = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
 ALLOWLIST |= NATIVE_FILES
 # The original license placeholder remains valid only in preserved historical trees.
 HISTORY_ALLOWLIST = ALLOWLIST | {'LICENSE.pending'}
+ALLOWLIST -= {'scripts/' + name + '.py' for name in SCRIPTS if name != 'release_audit'}
+ALLOWLIST -= {'.github/workflows/check.yml', 'tests/test_native.py'}
 PRIVATE = re.compile(r'/home/(?:dm|[a-z][a-z0-9_-]*)/|run-[a-f0-9]{12}|'
                      r'-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----|'
                      r'\bAKIA[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{24,}')

@@ -1,5 +1,18 @@
 // Resources embedded for independent native distribution.
 pub const FILES: &[(&str, &str)] = &[
+    (
+        "examples/config-codex.json",
+        include_str!("../examples/config-codex.json"),
+    ),
+    (
+        "examples/config-claude.json",
+        include_str!("../examples/config-claude.json"),
+    ),
+    (
+        "examples/project.json",
+        include_str!("../examples/project.json"),
+    ),
+    ("examples/task.md", include_str!("../examples/task.md")),
     ("AGENTS.md", include_str!("../AGENTS.md")),
     ("CLAUDE.md", include_str!("../CLAUDE.md")),
     (

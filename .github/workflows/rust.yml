@@ -19,15 +19,8 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --locked --release
-      - run: python -m unittest discover -s tests -p 'test_native.py' -v
-        env:
-          CONTROL_WORKFLOW_BIN: ${{ github.workspace }}/target/release/control-workflow
-          PYTHONDONTWRITEBYTECODE: '1'
-      - run: python -m unittest discover -s tests -p 'test_mcp.py' -v
-        env:
-          CONTROL_WORKFLOW_BIN: ${{ github.workspace }}/target/release/control-workflow
-          PYTHONDONTWRITEBYTECODE: '1'
-      - run: python -m unittest discover -s tests -p 'test_interop.py' -v
+      - run: python scripts/release_audit.py
+      - run: python -m unittest discover -s tests -v
         env:
           CONTROL_WORKFLOW_BIN: ${{ github.workspace }}/target/release/control-workflow
           PYTHONDONTWRITEBYTECODE: '1'

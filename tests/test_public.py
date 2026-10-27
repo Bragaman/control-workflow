@@ -8,15 +8,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
 import test_control as fixture
-sys.path.insert(0, str(fixture.SCRIPT.parent))
-import platform_support
-import runtime_config
-import herdr_claude
-import herdr_codex
-
-ROOT = fixture.SCRIPT.parents[1]
+ROOT = fixture.ROOT
+BINARY = fixture.BINARY
 
 
 class ClaudeLifecycleTests(fixture.ControlTests):
@@ -58,65 +52,66 @@ class PublicInstallTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(('CONTROL_PLANE_', 'HERDR_'))}
-        self.env.update(PYTHONDONTWRITEBYTECODE='1', XDG_CONFIG_HOME=str(self.root / 'config'),
+        self.env.update(HOME=str(self.root), PYTHONDONTWRITEBYTECODE='1', XDG_CONFIG_HOME=str(self.root / 'config'),
                         XDG_STATE_HOME=str(self.root / 'state'))
 
     def call(self, script, *args, ok=True):
-        result = subprocess.run([sys.executable, str(script), *map(str, args)], env=self.env,
+        result = subprocess.run([str(script), *map(str, args)], env=self.env,
                                 cwd=self.root, text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
         return result
 
     def test_install_update_preserves_checkpoint_and_skill_connections(self):
         prefix = self.root / 'программа с пробелами'
-        installed = json.loads(self.call(ROOT / 'scripts/install.py', '--prefix', prefix).stdout)
+        installed = json.loads(self.call(BINARY, 'install', '--prefix', prefix).stdout)
         self.assertFalse(installed['state_copied'])
         state = self.root / 'state-instance'; bindings = self.root / 'machine-bindings'
         config = self.root / 'user.json'; config.write_text('{"schema_version": 1}')
-        script = prefix / 'scripts/control.py'
+        script = prefix / 'bin/control-workflow'
         cli = ['--state-root', state, '--bindings-root', bindings, '--config', config]
         self.call(script, *cli, 'project-create', 'demo', '--name', 'Synthetic')
         checkpoint = state / 'checkpoint.md'; checkpoint.write_text('Saved checkpoint')
         before = {str(p.relative_to(state)): p.read_bytes() for p in state.rglob('*') if p.is_file()}
         config_before = config.read_bytes()
         for destination in (self.root / '.agents/skills', self.root / '.claude/skills'):
-            self.call(prefix / 'scripts/install_skills.py', '--destination', destination)
-            self.call(prefix / 'scripts/install_skills.py', '--destination', destination, '--action', 'check')
+            self.call(script, 'skills', '--destination', destination)
+            self.call(script, 'skills', '--destination', destination, '--action', 'check')
             self.assertEqual(len(list(destination.iterdir())), 8)
-        updated = json.loads(self.call(ROOT / 'scripts/install.py', '--prefix', prefix).stdout)
+        updated = json.loads(self.call(BINARY, 'install', '--prefix', prefix).stdout)
         self.assertTrue(Path(updated['backup']).is_dir())
         self.assertEqual(before, {str(p.relative_to(state)): p.read_bytes() for p in state.rglob('*') if p.is_file()})
         self.assertEqual(config_before, config.read_bytes())
         self.call(script, *cli, 'environment')
         for destination in (self.root / '.agents/skills', self.root / '.claude/skills'):
-            self.call(prefix / 'scripts/install_skills.py', '--destination', destination, '--action', 'check')
-            self.call(prefix / 'scripts/install_skills.py', '--destination', destination, '--action', 'remove')
+            self.call(script, 'skills', '--destination', destination, '--action', 'check')
+            self.call(script, 'skills', '--destination', destination, '--action', 'remove')
             self.assertEqual(list(destination.iterdir()), [])
 
     def test_install_refuses_modified_or_unmanaged_files(self):
         prefix = self.root / 'program'
-        self.call(ROOT / 'scripts/install.py', '--prefix', prefix)
+        self.call(BINARY, 'install', '--prefix', prefix)
         unmanaged = prefix / 'personal.json'; unmanaged.write_text('personal')
-        self.call(ROOT / 'scripts/install.py', '--prefix', prefix, ok=False)
+        self.call(BINARY, 'install', '--prefix', prefix, ok=False)
         self.assertEqual(unmanaged.read_text(), 'personal'); unmanaged.unlink()
         managed = prefix / 'README.md'; managed.write_text('local changes')
-        self.call(ROOT / 'scripts/install.py', '--prefix', prefix, ok=False)
+        self.call(BINARY, 'install', '--prefix', prefix, ok=False)
         self.assertEqual(managed.read_text(), 'local changes')
 
     def test_skill_conflict_is_atomic_and_remove_refuses_foreign_link(self):
         destination = self.root / 'skills'; destination.mkdir()
         foreign = destination / 'control-task'; foreign.mkdir()
-        self.call(ROOT / 'scripts/install_skills.py', '--destination', destination, ok=False)
+        self.call(BINARY, 'skills', '--destination', destination, ok=False)
         self.assertEqual(list(destination.iterdir()), [foreign]); foreign.rmdir()
-        self.call(ROOT / 'scripts/install_skills.py', '--destination', destination)
+        self.call(BINARY, 'skills', '--destination', destination)
         foreign.unlink(); foreign.symlink_to(self.root / 'missing')
-        self.call(ROOT / 'scripts/install_skills.py', '--destination', destination, '--action', 'remove', ok=False)
+        self.call(BINARY, 'skills', '--destination', destination, '--action', 'remove', ok=False)
         self.assertEqual(len(list(destination.iterdir())), 8)
 
     def test_default_paths_are_external_and_unknown_schema_fails_before_state(self):
-        script = ROOT / 'scripts/control.py'
+        script = BINARY
         environment = json.loads(self.call(script, 'environment').stdout)
-        self.assertEqual(environment['state_root'], str(self.root / 'state/control-workflow'))
+        expected = self.root / ('Library/Application Support/control-workflow/state' if sys.platform == 'darwin' else 'state/control-workflow')
+        self.assertEqual(environment['state_root'], str(expected))
         self.assertFalse((ROOT / 'projects').exists())
         state = self.root / 'unused'; config = self.root / 'bad.json'
         config.write_text('{"schema_version": 2}')
@@ -124,42 +119,21 @@ class PublicInstallTests(unittest.TestCase):
         self.assertFalse(state.exists())
 
     def test_default_model_uses_cli_configuration_for_both_adapters(self):
-        for module in (herdr_claude, herdr_codex):
-            run = {'id': 'run-synthetic', 'pane': 'w1:p1', 'model': 'default',
-                   'reasoning_effort': 'medium', 'worktrees': []}
-            args = module.start_args(run, {'id': 'demo'}, self.root, self.root / 'assignment.md',
-                                     self.root, ROOT / 'docs/worker.md', 1000)
-            self.assertNotIn('--model', args)
-            self.assertTrue(args[-1].startswith('demo: '))
-
-    def test_darwin_identity_uses_microsecond_start_and_zombie_status(self):
-        info = platform_support.BSDInfo(); info.start_sec = 123; info.start_usec = 456; info.status = 2
-        self.assertEqual(ctypes.sizeof(info), 136)
-        with patch.object(platform_support.sys, 'platform', 'darwin'), \
-             patch.object(platform_support, 'mac_info', return_value=info), \
-             patch.object(platform_support, 'output', return_value='boot-identity'):
-            identity = platform_support.process_identity(10)
-            self.assertEqual(identity, {'boot_id': 'boot-identity', 'start_sec': 123, 'start_usec': 456})
-            self.assertTrue(platform_support.process_running(10))
-            info.status = 5
-            self.assertFalse(platform_support.process_running(10))
-            info.start_usec += 1
-            self.assertNotEqual(identity, platform_support.process_identity(10))
-        with patch.object(runtime_config.sys, 'platform', 'darwin'), \
-             patch.object(Path, 'home', return_value=self.root):
-            state, config = runtime_config.default_paths()
-            self.assertEqual(state, self.root / 'Library/Application Support/control-workflow/state')
-            self.assertEqual(config, self.root / 'Library/Application Support/control-workflow/config.json')
-
-    def test_distribution_audit(self):
-        result = json.loads(self.call(ROOT / 'scripts/release_audit.py').stdout)
-        self.assertEqual(result['license'], 'MIT')
-
-    def test_installed_audit_rejects_historical_license_placeholder(self):
-        prefix = self.root / 'program'
-        self.call(ROOT / 'scripts/install.py', '--prefix', prefix)
-        result = json.loads(self.call(prefix / 'scripts/release_audit.py').stdout)
-        self.assertEqual(result['license'], 'MIT')
-        (prefix / 'LICENSE.pending').write_text('Historical placeholder')
-        rejected = self.call(prefix / 'scripts/release_audit.py', ok=False)
-        self.assertIn('LICENSE.pending', rejected.stderr)
+        for adapter, kind in [('herdr-codex', 'codex'), ('herdr-claude', 'claude')]:
+            with self.subTest(adapter=adapter):
+                case = fixture.ControlTests()
+                case.setUp()
+                try:
+                    config = Path(case.env['CONTROL_PLANE_CONFIG'])
+                    settings = json.loads(config.read_text())
+                    settings['adapter'] = adapter
+                    settings['profiles']['implementation']['normal']['model'] = 'default'
+                    config.write_text(json.dumps(settings))
+                    case.env['FAKE_KIND'] = kind
+                    case.create('default-model')
+                    case.start('default-model')
+                    args = next(c for c in case.calls() if c[:2] == ['agent', 'start'])
+                    self.assertNotIn('--model', args)
+                    self.assertTrue(args[-1].startswith('default-model: '))
+                finally:
+                    case.doCleanups()

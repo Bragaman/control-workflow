@@ -8,10 +8,10 @@
 рабочее хранилище с реальными задачами для примера не подходит.
 
 ```sh
-python3 /path/program/scripts/doctor.py --state-root /path/state --bindings-root /path/bindings --config /path/config.json
-python3 /path/program/scripts/control.py --state-root /path/state --bindings-root /path/bindings --config /path/config.json project-create demo --name 'Справочник'
-python3 /path/program/scripts/control.py --state-root /path/state --bindings-root /path/bindings --config /path/config.json task-create demo-check --project demo --title 'Проверить инструкцию' --goal 'Прочитать docs/worker.md и docs/control-entry.md установленной программы; подготовить отчёт о ролях, выборе экземпляра и приёмке, указать неоднозначности, если они есть' --acceptance 'План сохранён; отчёт с примерами или ссылками на прочитанные правила передан через finish' --no-code --task-kind implementation
-python3 /path/program/scripts/control.py --state-root /path/state --bindings-root /path/bindings --config /path/config.json --herdr-session control-workflow-demo open demo-check
+/path/program/bin/control-workflow --state-root /path/state --bindings-root /path/bindings --config /path/config.json doctor
+/path/program/bin/control-workflow --state-root /path/state --bindings-root /path/bindings --config /path/config.json project-create demo --name 'Справочник'
+/path/program/bin/control-workflow --state-root /path/state --bindings-root /path/bindings --config /path/config.json task-create demo-check --project demo --title 'Проверить инструкцию' --goal 'Прочитать docs/worker.md и docs/control-entry.md установленной программы; подготовить отчёт о ролях, выборе экземпляра и приёмке, указать неоднозначности, если они есть' --acceptance 'План сохранён; отчёт с примерами или ссылками на прочитанные правила передан через finish' --no-code --task-kind implementation
+/path/program/bin/control-workflow --state-root /path/state --bindings-root /path/bindings --config /path/config.json --herdr-session control-workflow-demo open demo-check
 ```
 
 open вернёт RUN_ID и статус. Управляющий показывает статус и цель, не ждёт

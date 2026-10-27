@@ -1,9 +1,9 @@
 # Команда и экземпляр панели
 
-Бери абсолютный путь control.py и параметры state/config/bindings из assignment.md
+Бери абсолютный путь bin/control-workflow и параметры state/config/bindings из assignment.md
 или выбранной пользователем установки. Из любого cwd вызывай
-`python3 /absolute/path/control_plane/scripts/control.py`.
-Установка и её встроенный state — разные выборы; неизвестный экземпляр уточни
+`/absolute/path/control_plane/bin/control-workflow`.
+Установка и state — разные выборы; неизвестный экземпляр уточни
 до записи. Выбранные пути показывает `environment`.
 
 Перед подкомандой: --state-root /path/state, --config /path/config.json,

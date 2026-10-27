@@ -7,15 +7,15 @@
 
 | Слой | Файлы | Выбор |
 | --- | --- | --- |
-| Программа | scripts/, config/defaults.json, docs/, skills/ | Физический путь control.py; ресурсы доступны для чтения |
+| Программа | bin/, config/defaults.json, docs/, skills/ | Физический путь bin/control-workflow; ресурсы доступны для чтения |
 | Пользователь | JSON с profiles, adapter, git_mode, agent_start_timeout_ms, state_root, bindings_root | --config, затем CONTROL_PLANE_CONFIG; без выбора — defaults.json |
 | Машина | BINDINGS_ROOT/runtime.json, projects/ID.json и tasks/ID.json | --bindings-root, CONTROL_PLANE_BINDINGS, bindings_root из config, иначе STATE_ROOT/bindings |
 | Состояние | projects/, tasks/, runs/, memory/, notifications/, views/, status/, .control.lock | --state-root, CONTROL_PLANE_STATE, прежний CONTROL_PLANE_ROOT, state_root из config, иначе внешний каталог ОС |
 
 Пути в JSON должны быть абсолютными. Относительные пути параметров CLI и
 переменных окружения разрешаются от текущего каталога. Для воспроизводимости
-используй абсолютные пути. CHILD получает выбранные state/config/bindings
-через окружение; запуск из собственного таба сохраняет их при complete.
+используй абсолютные пути. Дочерний процесс получает выбранные state/config/bindings
+явными аргументами; запуск из собственного таба сохраняет их при complete.
 
 Пользовательский JSON объединяется с defaults.json; можно заменить отдельный
 профиль без копирования всей таблицы. Например:
@@ -47,7 +47,7 @@ state. Репозитории, workspace, namespace и layout_pending проек
 Старые смешанные project/task JSON продолжают читаться. При следующей записи
 локальные поля сохраняются сначала в bindings, затем убираются из описания;
 сбой между записями оставляет обе копии, и bindings имеют приоритет.
-Для отката на старый код сначала выполни materialize-bindings: команда
+Для экспорта локальных полей выполни materialize-bindings: команда
 дублирует локальные поля в прежние JSON под блокировкой, сохраняя bindings. Текущие
 запуски, память и worktree не мигрируют и не удаляются. Переход нескольких файлов
 не образует общей транзакции: после аварии сверяй run, task и binding.

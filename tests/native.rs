@@ -90,7 +90,22 @@ fn native_package_is_independent_and_rejects_foreign_files() {
     assert!(result.status.success());
     let env: Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(env["program_root"], json!(prefix));
-    assert!(!prefix.join("scripts/control.py").exists());
+    assert!(!prefix.join("scripts").exists());
+    for name in [
+        "README.md",
+        "AGENTS.md",
+        "docs/install.md",
+        "docs/control-entry.md",
+        "examples/config-codex.json",
+        "examples/task.md",
+        "skills/control-sync/SKILL.md",
+    ] {
+        assert_eq!(
+            std::fs::read(prefix.join(name)).unwrap(),
+            std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(name)).unwrap(),
+            "shipped resource differs: {name}"
+        );
+    }
     std::fs::write(prefix.join("personal.txt"), "keep").unwrap();
     let result = Command::new(exe)
         .arg("--state-root")
@@ -347,4 +362,30 @@ fn read_outputs_keep_nonfinite_unknown_fields() {
     )
     .unwrap();
     assert_eq!(value[0]["future"].to_string(), "Infinity");
+}
+
+#[test]
+fn native_process_identity_detects_previous_boot_and_pid_reuse() {
+    use control_workflow::external;
+    let pid = std::process::id() as i64;
+    let identity = external::identity(pid).expect("current process identity");
+    assert!(external::process_running(pid));
+    let mut worker = json!({"worker_pid":pid,"worker_identity":identity});
+    assert!(external::launcher_alive(&worker));
+    worker["worker_identity"]["boot_id"] = json!("previous-boot");
+    assert!(!external::launcher_alive(&worker));
+    worker["worker_identity"] = external::identity(pid).unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        worker["worker_identity"]["start_ticks"] = json!("previous-process");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        worker["worker_identity"]["start_usec"] =
+            json!(worker["worker_identity"]["start_usec"].as_u64().unwrap() + 1);
+    }
+    assert!(!external::launcher_alive(&worker));
+    assert!(!external::request_alive(
+        &json!({"pid":pid,"identity":null})
+    ));
 }

@@ -1,6 +1,8 @@
 # Установка и обновление
 
-Нужны Python 3.10+, Git для задач с кодом и локальная POSIX-система.
+Нужны Linux/macOS, herdr и авторизованный CLI агента; для задач с кодом — Git.
+Для сборки из исходников нужны Rust 1.91.0 и linker платформы. Готовая поставка
+работает без Python и Rust toolchain.
 Программа, herdr и CLI агента работают на одной машине. Границы проверенной
 поддержки перечислены в [матрице](compatibility.md).
 
@@ -27,7 +29,10 @@ herdr --version
 ## Новый экземпляр с Codex
 
 Начни в корне проверенного checkout control-workflow. Команды ниже используют
-новые каталоги; если они уже заняты, выбери другие. В одной оболочке выполни:
+новые каталоги; если они уже заняты, выбери другие. Архив нужной ОС и архитектуры доступен в артефакте native-OS-ARCH
+workflow native-rust в CI репозитория: внутри лежит tar.gz и SHA256SUMS.
+Сверь SHA-256 архива с SHA256SUMS и распакуй его в CW_PROGRAM; команды сборки и install
+ниже тогда пропусти. В одной оболочке выполни:
 
 ```sh
 export CW_PROGRAM="$HOME/.local/share/control-workflow/program"
@@ -35,12 +40,13 @@ export CW_STATE="$HOME/.local/state/control-workflow-demo"
 export CW_BINDINGS="$HOME/.local/state/control-workflow-demo-bindings"
 export CW_CONFIG="$HOME/.config/control-workflow-demo/config.json"
 export CW_MANAGER="$HOME/control-workflow-manager-demo"
-python3 scripts/release_audit.py
-python3 scripts/install.py --prefix "$CW_PROGRAM"
+cargo build --locked --release
+cargo test --locked
+target/release/control-workflow install --prefix "$CW_PROGRAM"
 mkdir -p "$(dirname "$CW_CONFIG")" "$CW_MANAGER"
 cp "$CW_PROGRAM/examples/config-codex.json" "$CW_CONFIG"
-python3 "$CW_PROGRAM/scripts/doctor.py" --state-root "$CW_STATE" --bindings-root "$CW_BINDINGS" --config "$CW_CONFIG"
-python3 "$CW_PROGRAM/scripts/control.py" --state-root "$CW_STATE" --bindings-root "$CW_BINDINGS" --config "$CW_CONFIG" environment
+"$CW_PROGRAM/bin/control-workflow" --state-root "$CW_STATE" --bindings-root "$CW_BINDINGS" --config "$CW_CONFIG" doctor
+"$CW_PROGRAM/bin/control-workflow" --state-root "$CW_STATE" --bindings-root "$CW_BINDINGS" --config "$CW_CONFIG" environment
 ```
 
 Проверь выбранные пути в environment и found в выводе doctor. Doctor создаёт
@@ -52,8 +58,8 @@ state и bindings и проверяет запись временным файл
 Подключи восемь скиллов управляющего:
 
 ```sh
-python3 "$CW_PROGRAM/scripts/install_skills.py" --destination "$CW_MANAGER/.agents/skills"
-python3 "$CW_PROGRAM/scripts/install_skills.py" --destination "$CW_MANAGER/.agents/skills" --action check
+"$CW_PROGRAM/bin/control-workflow" skills --destination "$CW_MANAGER/.agents/skills"
+"$CW_PROGRAM/bin/control-workflow" skills --destination "$CW_MANAGER/.agents/skills" --action check
 ```
 
 [Codex обнаруживает .agents/skills и следует symlink](https://learn.chatgpt.com/docs/build-skills).
@@ -78,7 +84,7 @@ herdr --session control-workflow-demo
 
 ```text
 Управляй экземпляром control-workflow:
-программа /absolute/path/program/scripts/control.py,
+программа /absolute/path/program/bin/control-workflow,
 --state-root /absolute/path/state,
 --bindings-root /absolute/path/bindings,
 --config /absolute/path/config.json,
@@ -101,8 +107,11 @@ herdr --session control-workflow-demo
 ## Обновление
 
 Останови запуск новых задач. Дождись завершения команд запуска и приёмки,
-а также текущего хода каждого работающего исполнителя. Запусти install.py из нового
-проверенного checkout с прежним --prefix. Состояние и config не переносится.
+а также текущего хода каждого работающего исполнителя. Распакуй новую поставку
+в отдельный каталог и вызови её `bin/control-workflow install --prefix PATH`
+с прежним prefix. При обновлении из исходников сначала собери новый бинарник
+и вызови `target/release/control-workflow install --prefix PATH`.
+Используй бинарник вне обновляемого каталога. Состояние и config не переносится.
 Установщик сверяет хеши прежних управляемых файлов, отказывает при чужих файлах
 или ручных изменениях, готовит новую копию и сохраняет старую в backup,
 путь которого возвращает в JSON. Проверенные ссылки скиллов указывают на
@@ -111,11 +120,11 @@ herdr --session control-workflow-demo
 Если процесс установки аварийно остановился между переименованиями, сначала
 сверь prefix и соседние каталоги stage/backup. Не запускай повторное обновление
 до сверки: это локальная операция без общей транзакции нескольких каталогов.
-Для отката при остановленных подготовителях переименуй новую программу в
+Для отката после завершения команд запуска и приёмки и текущих ходов исполнителей переименуй новую программу в
 отдельный каталог и верни backup на прежний prefix. Config/state/bindings
 остаются на своих местах. Не откатывай данные поверх параллельной работы.
 
-Снять только свои ссылки: install_skills.py --destination /path/skills
+Снять только свои ссылки: bin/control-workflow skills --destination /path/skills
 --action remove. Чужие файлы и ссылки блокируют операцию до изменений.
 Перенос программы в другой prefix требует снять прежние подключения и
 подключить новые. Ветки задач и их артефакты при этом сохраняются отдельно.

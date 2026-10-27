@@ -6,7 +6,7 @@
 её целиком. Продолжай выдачу через --offset next_offset или уточняй запрос. При восстановлении сначала читай предыдущий checkpoint, затем
 state.json, questions.json, progress.md и result.md, если они есть.
 
-Используй полную команду control.py из задания с выбранными state/config/bindings:
+Используй полную команду control-workflow из задания с выбранными state/config/bindings:
 текущий каталог, в том числе worktree, не выбирает экземпляр. Для progress,
 block, finish и памяти своего запуска указывай --run RUN_ID. JSON состояния
 меняй через CLI панели.

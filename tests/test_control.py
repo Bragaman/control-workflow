@@ -11,7 +11,8 @@ import time
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "control.py"
+ROOT = Path(__file__).resolve().parents[1]
+BINARY = Path(os.environ.get("CONTROL_WORKFLOW_BIN", ROOT / "target/debug/control-workflow")).resolve()
 FAKE_HERDR = '''#!/usr/bin/env python3
 import json, os, sys, time
 from pathlib import Path
@@ -148,7 +149,7 @@ class ControlTests(unittest.TestCase):
         self.cli("project-create", "lab", "--name", "Лаборатория")
 
     def cli(self, *args, ok=True, env=None):
-        result = subprocess.run([sys.executable, str(SCRIPT), *args], env=env or self.env,
+        result = subprocess.run([str(BINARY), *args], env=env or self.env,
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0 if ok else 1, result.stdout + result.stderr)
         return json.loads(result.stdout)
@@ -252,19 +253,10 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.cli('review-read', *args, '--section', 'diff'), frozen['manifest']['repositories'][0])
         self.assertIsNone(self.cli('review-read', *args, '--section', 'blob', '--path', str(binary))['content'])
         self.cli('review-read', *args, '--section', 'diff', '--repository', '-1', ok=False)
-        # Exercise the handler with a fake context: all attempts share one observation.
-        import importlib.util
-        from types import SimpleNamespace
-        from unittest.mock import MagicMock, patch
-        spec = importlib.util.spec_from_file_location('review_module', SCRIPT.parent / 'agent_review.py')
-        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-        c = MagicMock()
-        c.read.return_value = {'id': r['id'], 'task': 'task1'}
-        history = {'attempts': [dict(id='a', version='v'), dict(id='b', version='old')]}
-        with patch.object(module, 'load', return_value=history), patch.object(module, 'snapshot', return_value={'version': 'v'}) as snap:
-            module.handle(c, SimpleNamespace(run=r['id'], command='review-show', latest=False))
-        snap.assert_called_once()
-        self.assertEqual([x['stale'] for x in history['attempts']], [False, True])
+        history = self.cli('review-show', '--run', r['id'])['attempts']
+        self.assertFalse(history[-1]['stale'])
+        binary.write_bytes(b'changed')
+        self.assertTrue(self.cli('review-show', '--run', r['id'])['attempts'][-1]['stale'])
 
     def test_agent_review_fast_finish_before_delivery_ack(self):
         r, a = self.agent_review_changes()
@@ -349,24 +341,12 @@ class ControlTests(unittest.TestCase):
 
     def test_agent_review_repairs_partial_run_task_write(self):
         r, a = self.agent_review_changes()
-        scripts = self.root / "fault_scripts"
-        shutil.copytree(SCRIPT.parent, scripts)
-        (self.root / "config").mkdir(exist_ok=True)
-        shutil.copy2(SCRIPT.parents[1] / "config/defaults.json", self.root / "config/defaults.json")
-        injected = scripts / "control.py"
-        text = injected.read_text()
-        wrapper = ("PROGRAM_ROOT = Path(" + repr(str(SCRIPT.parents[1])) + ")\n_original_save = save\n"
-            "def save(file, obj, **kwargs):\n"
-            "    if file.parent.name == 'tasks' and obj.get('status') == 'running':\n"
-            "        raise OSError('injected task-save failure')\n"
-            "    return _original_save(file, obj, **kwargs)\n\n")
-        injected.write_text(text.replace('if __name__ == "__main__":', wrapper + 'if __name__ == "__main__":'))
-        failed = subprocess.run([sys.executable, str(injected), "review-feedback", "--run", r["id"], "--id", a["id"]],
-            env=self.env, capture_output=True, text=True, timeout=10)
-        self.assertEqual(failed.returncode, 1, failed.stdout + failed.stderr)
-        self.assertIn("injected task-save failure", failed.stdout)
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"])
+        task_file = self.root / "tasks/task1.json"
+        task = json.loads(task_file.read_text())
+        task['status'] = 'review'
+        task_file.write_text(json.dumps(task))
         self.assertEqual(self.cli("run", r["id"])["status"], "running")
-        self.assertEqual(self.cli("show", "tasks", "task1")["status"], "review")
         self.cli("review-feedback", "--run", r["id"], "--id", a["id"])
         self.assertEqual(self.cli("show", "tasks", "task1")["status"], "running")
 
@@ -671,7 +651,7 @@ class ControlTests(unittest.TestCase):
     def test_open_concurrent_calls_start_only_one_executor(self):
         self.create()
         self.env["FAKE_DELAY"] = "0.6"
-        argv = [sys.executable, str(SCRIPT), "open", "task1"]
+        argv = [str(BINARY), "open", "task1"]
         processes = [subprocess.Popen(argv, env=self.env, stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE, text=True) for _ in range(2)]
         results = []
@@ -782,7 +762,7 @@ class ControlTests(unittest.TestCase):
         self.bind_stale()
         self.create("task1")
         self.create("task2")
-        processes = [subprocess.Popen([sys.executable, str(SCRIPT), "start", key],
+        processes = [subprocess.Popen([str(BINARY), "start", key],
                      env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                      for key in ("task1", "task2")]
         for process in processes:
@@ -813,27 +793,11 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.cli("show", "projects", "lab"), before)
         self.assertFalse((self.root / "runs").exists())
 
-    def test_old_boot_pid_does_not_block_but_same_identity_does(self):
-        self.create()
-        run = self.start()
-        self.cli("interrupt", "task1", "--reason", "save context")
-        file = self.root / "runs" / run["id"] / "state.json"
-        run = json.loads(file.read_text())
-        run["worker_pid"] = os.getpid()
-        sys.path.insert(0, str(SCRIPT.parent))
-        import platform_support
-        run["worker_identity"] = platform_support.process_identity(os.getpid())
-        file.write_text(json.dumps(run))
-        self.cli("start", "task1", ok=False)
-        run["worker_identity"]["boot_id"] = "previous-boot"
-        file.write_text(json.dumps(run))
-        self.start()
-
     def test_second_launcher_cannot_change_owned_launch(self):
         self.create()
         self.env["FAKE_DELAY"] = "1"
         result = self.cli("start", "task1")
-        other = subprocess.run([sys.executable, str(SCRIPT), "_launch", result["run"]],
+        other = subprocess.run([str(BINARY), "_launch", result["run"]],
                                env=self.env, capture_output=True, text=True, timeout=10)
         self.assertEqual(other.returncode, 1)
         self.wait_run(result["run"])
@@ -1066,7 +1030,7 @@ class ControlTests(unittest.TestCase):
 
     def test_simultaneous_start_only_one_wins(self):
         self.create()
-        argv = [sys.executable, str(SCRIPT), "start", "task1"]
+        argv = [str(BINARY), "start", "task1"]
         processes = [subprocess.Popen(argv, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
         outputs = [p.communicate(timeout=10) for p in processes]
         self.assertEqual(sorted(p.returncode for p in processes), [0, 1])
@@ -1496,7 +1460,7 @@ class ControlTests(unittest.TestCase):
     def test_complete_own_tab_parallel_requests_do_not_duplicate(self):
         r = self.review()
         self.env.update(HERDR_PANE_ID="w7:p1", FAKE_CLOSE_DELAY="0.4")
-        argv = [sys.executable, str(SCRIPT), "complete", "task1"]
+        argv = [str(BINARY), "complete", "task1"]
         children = [subprocess.Popen(argv, env=self.env, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, text=True) for _ in range(4)]
         for child in children:

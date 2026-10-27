@@ -10,7 +10,7 @@ import unittest
 from urllib.parse import unquote, urlsplit
 import test_control as fixture
 
-SCRIPT = fixture.SCRIPT
+BINARY = fixture.BINARY
 
 
 class RuntimeTests(unittest.TestCase):
@@ -23,7 +23,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_two_states_from_arbitrary_cwd_and_cli_precedence(self):
         second = self.root / 'second'
-        argv = [sys.executable, str(SCRIPT), '--state-root', str(second)]
+        argv = [str(BINARY), '--state-root', str(second)]
         result = subprocess.run([*argv, 'project-create', 'other', '--name', 'Другой'],
                                 env=self.env, cwd='/tmp', capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -87,18 +87,16 @@ class RuntimeTests(unittest.TestCase):
             self.assertFalse(state.exists())
 
     def test_read_only_installation_launches_using_external_state(self):
-        install = self.root / 'installation'; install.mkdir()
-        for directory in ('scripts', 'config', 'docs', 'skills'):
-            shutil.copytree(SCRIPT.parents[1] / directory, install / directory,
-                            ignore=shutil.ignore_patterns('__pycache__'))
+        install = self.root / 'installation'
+        self.cli('--state-root', str(self.root / 'package-state'), '--bindings-root', str(self.root / 'package-bindings'), 'package', '--prefix', str(install))
         for file in install.rglob('*'):
-            file.chmod(0o555 if file.is_dir() else 0o444)
+            file.chmod(0o555 if file.is_dir() else (0o555 if file.name == 'control-workflow' else 0o444))
         install.chmod(0o555)
         self.addCleanup(lambda: [p.chmod(0o755) for p in [install, *install.rglob('*')] if p.is_dir()])
         state = self.root / 'readonly-state'
-        copied_script = install / 'scripts/control.py'
+        copied_binary = install / 'bin/control-workflow'
         def call(*args):
-            result = subprocess.run([sys.executable, str(copied_script), '--state-root', str(state), *args],
+            result = subprocess.run([str(copied_binary), '--state-root', str(state), *args],
                                     cwd='/tmp', env=self.env, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             return json.loads(result.stdout)
@@ -112,7 +110,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(r['program_root'], str(install))
             assignment = (state / 'runs' / run / 'assignment.md').read_text()
             self.assertIn(str(install / 'docs/worker.md'), assignment)
-            self.assertFalse((install / 'scripts/__pycache__').exists())
+            self.assertFalse((install / 'scripts').exists())
         finally:
             self.root = original
 
