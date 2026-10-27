@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "luna": {
+      "model": "gpt-6-luna",
+      "reasoning_effort": "medium"
+    },
+    "terra": {
+      "model": "gpt-6.1-terra",
+      "reasoning_effort": "medium"
+    },
+    "sol": {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "medium"
+    },
+    "sol-high": {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "high"
+    },
+    "astra": {
+      "model": "gpt-6-astra",
+      "reasoning_effort": "medium"
+    }
+  },
+  "rules": {
+    "implementation": {
+      "normal": "sol",
+      "complex": "sol-high"
+    },
+    "research": {
+      "normal": "sol",
+      "complex": "sol-high"
+    },
+    "reasoning": {
+      "normal": "sol",
+      "complex": "sol-high"
+    },
+    "planning": {
+      "normal": "sol",
+      "complex": "sol-high"
+    }
+  }
+}

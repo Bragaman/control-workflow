@@ -1,6 +1,14 @@
 // Resources embedded for independent native distribution.
 pub const FILES: &[(&str, &str)] = &[
     (
+        "config/model-policy.json",
+        include_str!("../config/model-policy.json"),
+    ),
+    (
+        "docs/model-policy.md",
+        include_str!("../docs/model-policy.md"),
+    ),
+    (
         "examples/config-codex.json",
         include_str!("../examples/config-codex.json"),
     ),

@@ -691,6 +691,18 @@
         "multiple": false,
         "boolean": false,
         "integer": false
+      },
+      {
+        "name": "profile",
+        "flags": [
+          "--profile"
+        ],
+        "default": null,
+        "required": false,
+        "boolean": false,
+        "multiple": false,
+        "integer": false,
+        "choices": null
       }
     ]
   },
@@ -870,6 +882,18 @@
         "multiple": false,
         "boolean": false,
         "integer": false
+      },
+      {
+        "name": "profile",
+        "flags": [
+          "--profile"
+        ],
+        "default": null,
+        "required": false,
+        "boolean": false,
+        "multiple": false,
+        "integer": false,
+        "choices": null
       }
     ]
   },
@@ -913,6 +937,18 @@
         "multiple": false,
         "boolean": false,
         "integer": false
+      },
+      {
+        "name": "profile",
+        "flags": [
+          "--profile"
+        ],
+        "default": null,
+        "required": false,
+        "boolean": false,
+        "multiple": false,
+        "integer": false,
+        "choices": null
       }
     ]
   },
@@ -928,6 +964,18 @@
         "multiple": true,
         "boolean": false,
         "integer": false
+      },
+      {
+        "name": "profile",
+        "flags": [
+          "--profile"
+        ],
+        "default": null,
+        "required": false,
+        "boolean": false,
+        "multiple": false,
+        "integer": false,
+        "choices": null
       }
     ]
   },

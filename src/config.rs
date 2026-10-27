@@ -125,9 +125,12 @@ impl Context {
             .map(location)
             .transpose()?;
         let mut settings: Value = serde_json::from_str(include_str!("../config/defaults.json"))?;
-        if let Some(p) = &config {
-            merge(&mut settings, &store::raw(p)?)?;
-        }
+        let local = config
+            .as_ref()
+            .map(|p| store::raw(p))
+            .transpose()?
+            .unwrap_or_else(|| serde_json::json!({}));
+        merge(&mut settings, &local)?;
         for k in ["state_root", "bindings_root"] {
             if let Some(v) = settings[k].as_str() {
                 ensure!(
@@ -144,6 +147,18 @@ impl Context {
                 .or_else(|| settings["state_root"].as_str().map(PathBuf::from))
                 .unwrap_or(default_state),
         )?;
+        // Detached launch already has its selection in state.json. Its policy may
+        // have changed or disappeared since CLI/MCP resolved that selection.
+        let saved_selection = if let Some(launch) = a.subcommand_matches("_launch") {
+            let id = store::ident(launch.get_one::<String>("run").unwrap())?;
+            let run = store::raw(&root.join("runs").join(id).join("state.json"))?;
+            run["model"].is_string() && run["reasoning_effort"].is_string()
+        } else {
+            false
+        };
+        if !saved_selection {
+            crate::policy::load(&mut settings, config.as_deref(), &local)?;
+        }
         let bindings = location(
             a.get_one::<String>("bindings-root")
                 .map(PathBuf::from)
@@ -190,22 +205,12 @@ impl Context {
                 .is_some_and(|n| n > 0),
             "agent_start_timeout_ms должен быть положительным целым числом"
         );
-        for kind in ["implementation", "research", "reasoning", "planning"] {
-            for c in ["normal", "complex"] {
-                let p = &settings["profiles"][kind][c];
-                ensure!(
-                    !s(p, "model").trim().is_empty(),
-                    "Профиль должен содержать model"
-                );
-                let allowed = if settings["adapter"] == "herdr-claude" {
-                    vec!["low", "medium", "high", "xhigh", "max"]
-                } else {
-                    vec!["low", "medium", "high", "xhigh", "max", "ultra"]
-                };
-                ensure!(
-                    allowed.contains(&s(p, "reasoning_effort")),
-                    "Неизвестный reasoning_effort"
-                );
+        if !saved_selection {
+            for kind in ["implementation", "research", "reasoning", "planning"] {
+                for c in ["normal", "complex"] {
+                    let p = &settings["profiles"][kind][c];
+                    crate::policy::validate_model(p, s(&settings, "adapter"))?;
+                }
             }
         }
         let session = a

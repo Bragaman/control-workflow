@@ -52,8 +52,9 @@ cp "$CW_PROGRAM/examples/config-codex.json" "$CW_CONFIG"
 Проверь выбранные пути в environment и found в выводе doctor. Doctor создаёт
 state и bindings и проверяет запись временным файлом; без --herdr-session он
 не обращается к серверу. Он не проверяет авторизацию или доступность модели.
-Пример config использует model=default — выбор модели остаётся за CLI.
-Назначение и сложность задачи выбирают профиль; для своей модели измени config.
+Пример config-codex подключает встроенную политику: normal → sol, complex → sol-high.
+Выбор профиля и миграция старого config описаны в [model-policy.md](model-policy.md).
+Пример Claude сохраняет прежний model=default; для него подготовь политику с моделями Claude.
 
 Подключи восемь скиллов управляющего:
 

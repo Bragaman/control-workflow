@@ -7,6 +7,7 @@ pub mod external;
 pub mod git;
 pub mod lifecycle;
 pub mod mcp;
+pub mod policy;
 pub mod review;
 pub mod shipping;
 pub mod store;

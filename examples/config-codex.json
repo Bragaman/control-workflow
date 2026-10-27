@@ -2,12 +2,5 @@
   "schema_version": 1,
   "adapter": "herdr-codex",
   "git_mode": "branch",
-  "profiles": {
-    "implementation": {
-      "normal": {
-        "model": "default",
-        "reasoning_effort": "medium"
-      }
-    }
-  }
+  "model_policy": "builtin"
 }

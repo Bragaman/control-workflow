@@ -9,6 +9,9 @@ use serde_json::{Value, json};
 use std::{fs, io::Write, path::Path};
 
 pub fn profile(c: &Context, t: &Value) -> Result<Value> {
+    profile_for_run(c, t, None)
+}
+pub fn profile_for_run(c: &Context, t: &Value, explicit: Option<&str>) -> Result<Value> {
     let title = crate::casefold::fold(s(t, "title"));
     let title = title.split("по результатам").next().unwrap_or(&title);
     let kind = t["task_kind"].as_str().unwrap_or_else(|| {
@@ -32,11 +35,12 @@ pub fn profile(c: &Context, t: &Value) -> Result<Value> {
         }
     });
     let complexity = t["complexity"].as_str().unwrap_or("normal");
-    let p = &c.settings["profiles"][kind][complexity];
-    ensure!(p.is_object(), "Неизвестный тип или сложность задачи");
-    Ok(
-        json!({"task_kind":kind,"complexity":complexity,"model":p["model"],"reasoning_effort":p["reasoning_effort"]}),
-    )
+    ensure!(
+        ["implementation", "research", "reasoning", "planning"].contains(&kind)
+            && ["normal", "complex"].contains(&complexity),
+        "Неизвестный тип или сложность задачи"
+    );
+    crate::policy::resolve(c, t, kind, complexity, explicit)
 }
 pub fn extend(v: &mut Value, extra: Value) {
     v.as_object_mut()
@@ -60,6 +64,8 @@ fn task_response(t: Value, compact: bool) -> Value {
             "complexity",
             "model",
             "reasoning_effort",
+            "profile",
+            "model_selection",
             "reviewer",
             "agent_review_policy",
             "git_mode",
@@ -75,7 +81,7 @@ pub fn execute(c: &Context, name: &str, a: &Value) -> Result<Value> {
         "start" => {
             c.require_herdr()?;
             let _lock = c.lock()?;
-            lifecycle::start(c, s(a, "id"), false, false)
+            lifecycle::start(c, s(a, "id"), false, false, a["profile"].as_str())
         }
         "open" => lifecycle::open(c, a),
         "_launch" => lifecycle::launch(c, s(a, "run")),
@@ -120,7 +126,7 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
     let id = s(a, "id");
     match name {
         "environment" => Ok(
-            json!({"program_root":c.program,"state_root":c.root,"bindings_root":c.bindings,"config":c.config,"adapter":c.settings["adapter"],"git_mode":c.settings["git_mode"],"documents":(["worker.md","planning.md","git-policy.md","recovery.md"].into_iter().map(|n|(n,c.program.join("docs").join(n))).collect::<std::collections::BTreeMap<_,_>>())}),
+            json!({"program_root":c.program,"state_root":c.root,"bindings_root":c.bindings,"config":c.config,"model_policy":c.settings["model_policy_origin"],"model_policy_enabled":c.settings["model_policy_enabled"],"model_profiles":c.settings["resolved_model_policy"],"adapter":c.settings["adapter"],"git_mode":c.settings["git_mode"],"documents":(["worker.md","planning.md","git-policy.md","recovery.md"].into_iter().map(|n|(n,c.program.join("docs").join(n))).collect::<std::collections::BTreeMap<_,_>>())}),
         ),
         "project-create" => {
             ensure!(id != "shared", "ID shared зарезервирован для общей памяти");
@@ -187,7 +193,11 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
                 ensure!(dep != id, "Задача не может зависеть от себя");
                 c.task(&dep)?;
             }
-            let mut t = json!({"id":id,"project":a["project"],"title":a["title"],"goal":a["goal"],"acceptance":a["acceptance"],"status":"backlog","code":a["code"],"repositories":a["repo"],"depends":a["depends"],"reviewer":"user","git_mode":a["git_mode"].as_str().unwrap_or(s(&c.settings,"git_mode")),"agent_review_policy":a["agent_review_policy"],"active_run":null,"runs":[],"created_at":now(),"updated_at":now(),"task_kind":a["task_kind"],"complexity":a["complexity"]});
+            let mut t = json!({"id":id,"project":a["project"],"title":a["title"],"goal":a["goal"],"acceptance":a["acceptance"],"status":"backlog","code":a["code"],"repositories":a["repo"],"depends":a["depends"],"reviewer":"user","git_mode":a["git_mode"].as_str().unwrap_or(s(&c.settings,"git_mode")),"agent_review_policy":a["agent_review_policy"],"active_run":null,"runs":[],"created_at":now(),"updated_at":now(),"task_kind":a["task_kind"],"complexity":a["complexity"],"profile":a["profile"],"profile_source":"task"});
+            if a["profile"] == "auto" {
+                t["profile"] = Value::Null;
+                t["profile_source"] = json!("rule");
+            }
             let p = profile(c, &t)?;
             extend(&mut t, p);
             c.save(&file, &t)?;
@@ -222,6 +232,14 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
                         .map(location)
                         .collect::<Result<Vec<_>>>()?
                 );
+            }
+            if let Some(name) = a["profile"].as_str() {
+                t["profile"] = if name == "auto" {
+                    Value::Null
+                } else {
+                    json!(name)
+                };
+                t["profile_source"] = json!("task");
             }
             let p = profile(c, &t)?;
             extend(&mut t, p);

@@ -204,8 +204,15 @@ pub fn mark_recovered(c: &Context, r: &mut Value, t: &mut Value) -> Result<()> {
         json!("Старт восстановлен: агент и путь задания подтверждены в созданном терминале");
     c.update(r, t)
 }
-pub fn start(c: &Context, id: &str, reopen: bool, repair: bool) -> Result<Value> {
+pub fn start(
+    c: &Context,
+    id: &str,
+    reopen: bool,
+    repair: bool,
+    requested: Option<&str>,
+) -> Result<Value> {
     let mut t = c.task(id)?;
+    let run_profile = core::profile_for_run(c, &t, requested)?;
     ensure!(
         reopen || ["backlog", "ready"].contains(&s(&t, "status")),
         "Запуск разрешён для backlog/ready. Для blocked сохраните answer и продолжите текущий запуск; для прерванной — interrupt"
@@ -257,10 +264,11 @@ pub fn start(c: &Context, id: &str, reopen: bool, repair: bool) -> Result<Value>
         git::git(repo, &["rev-parse", "--verify", "HEAD"], false)?;
     }
     let id = key("run-");
-    let profile = core::profile(c, &t)?;
-    extend(&mut t, profile.clone());
+    if requested.is_none() {
+        extend(&mut t, run_profile.clone());
+    }
     let mut r = json!({"id":id,"task":t["id"],"project":p["id"],"status":"launching","created_at":now(),"updated_at":now(),"repositories":repos,"worktrees":[],"previous_run":t["active_run"],"workspace":null,"tab":null,"pane":null,"worker_pid":null,"herdr_session":ns["session"],"herdr_namespace":ns,"adapter":c.settings["adapter"],"capabilities":external::capabilities(s(&c.settings,"adapter")),"access_policy":if c.settings["adapter"]=="herdr-claude"{"default"}else{"workspace-write"},"program_root":c.program,"state_root":c.root,"bindings_root":c.bindings,"git_mode":t["git_mode"].as_str().unwrap_or("main")});
-    extend(&mut r, profile);
+    extend(&mut r, run_profile);
     if let Some(prev) = &previous
         && let Some(wts) = prev["worktrees"].as_array().filter(|w| !w.is_empty())
     {
@@ -326,7 +334,14 @@ fn summary(c: &Context, t: &Value, r: Option<&Value>, action: &str) -> Result<Va
             &mut v,
             json!({"run":r["id"],"run_status":r["status"],"state":c.run_file(s(r,"id"))?,"workspace":r["workspace"],"tab":r["tab"],"pane":r["pane"]}),
         );
-        for k in ["model", "reasoning_effort", "error", "progress"] {
+        for k in [
+            "model",
+            "reasoning_effort",
+            "profile",
+            "model_selection",
+            "error",
+            "progress",
+        ] {
             if let Some(value) = r.get(k) {
                 v[k] = value.clone();
             }
@@ -357,16 +372,25 @@ fn summary(c: &Context, t: &Value, r: Option<&Value>, action: &str) -> Result<Va
     }
     Ok(v)
 }
-fn open_one(c: &Context, id: &str) -> Result<Value> {
+fn open_one(c: &Context, id: &str, requested: Option<&str>) -> Result<Value> {
     let t = c.task(id)?;
+    let selected = requested
+        .map(|name| core::profile_for_run(c, &t, Some(name)))
+        .transpose()?;
     let r = t["active_run"]
         .as_str()
         .map(|id| c.read(&c.run_file(id)?))
         .transpose()?;
     if ["done", "cancelled", "review"].contains(&s(&t, "status")) {
+        ensure!(
+            requested.is_none(),
+            "--profile требует нового запуска; задача находится в {}",
+            t["status"]
+        );
         return summary(c, &t, r.as_ref(), "result");
     }
     if r.as_ref().is_some_and(|r| r["status"] == "blocked") {
+        crate::policy::check_reuse(selected.as_ref(), r.as_ref().unwrap())?;
         return summary(c, &t, r.as_ref(), "awaiting_answer");
     }
     if let Some(mut r) = r {
@@ -378,6 +402,7 @@ fn open_one(c: &Context, id: &str) -> Result<Value> {
         );
         if launcher_alive(&r) {
             c.check_namespace(&r)?;
+            crate::policy::check_reuse(selected.as_ref(), &r)?;
             return summary(c, &t, Some(&r), "preparing");
         }
         if !r["pane"].is_null() {
@@ -397,6 +422,7 @@ fn open_one(c: &Context, id: &str) -> Result<Value> {
                                 && agent_state(c, &r)? == "confirmed",
                             "Терминал не подтверждает исполнителя с заданием этого запуска"
                         );
+                        crate::policy::check_reuse(selected.as_ref(), &r)?;
                         let mut t = t;
                         let mut action = "existing";
                         if ["launch_failed", "interrupted", "launching"].contains(&s(&r, "status"))
@@ -417,7 +443,7 @@ fn open_one(c: &Context, id: &str) -> Result<Value> {
         "Открытие недоступно для статуса {}",
         s(&t, "status")
     );
-    start(c, id, !t["active_run"].is_null(), true)?;
+    start(c, id, !t["active_run"].is_null(), true, requested)?;
     let t = c.task(id)?;
     let r = c.read(&c.run_file(s(&t, "active_run"))?)?;
     summary(
@@ -440,7 +466,7 @@ pub fn open(c: &Context, a: &Value) -> Result<Value> {
             continue;
         }
         let _lock = c.lock()?;
-        match open_one(c, &id) {
+        match open_one(c, &id, a["profile"].as_str()) {
             Ok(v) => results.push(v),
             Err(e) => {
                 let mut v = json!({"task":id,"action":"error","error":e.to_string(),"error_code":error_code(&e),"next_action":"Прочитайте файлы указанного запуска и docs/recovery.md программы"});
@@ -507,6 +533,10 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
             "Запуск уже подготовлен или принадлежит другому подготовителю"
         );
         c.check_namespace(&r)?;
+        if r["model"].is_null() || r["reasoning_effort"].is_null() {
+            extend(&mut r, core::profile(c, &t)?);
+            c.update(&mut r, &mut t)?;
+        }
     }
     let repos = strings(&r["repositories"]);
     let done = r["worktrees"]
@@ -645,9 +675,6 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
             r["herdr_session"].as_str(),
         )?;
     }
-    if r["model"].is_null() || r["reasoning_effort"].is_null() {
-        extend(&mut r, core::profile(c, &t)?);
-    }
     let assignment = c.run_file(id)?.with_file_name("assignment.md");
     store::atomic(&assignment, assignment_text(c, &r, &t)?.as_bytes())?;
     let argv = external::start_args(c, &mut r, &t, &cwd, &assignment);
@@ -762,7 +789,7 @@ pub fn assignment_text(c: &Context, r: &Value, t: &Value) -> Result<String> {
         "нет".into()
     };
     Ok(format!(
-        "# Задача {}: {}\n\nЦель: {}\n\nКритерии готовности: {}\n\nСостояние панели: {}\nРесурсы программы: {}\nЗапуск: {}\nАдаптер: {}\nМодель: {}; reasoning effort: {}.\nПроект: {}\nРабочие деревья: {}\nЗавершение Git: {}; контракт: {}\nПриёмка: {}.\n\nДо работы прочитай контракт исполнителя: {}.\nПравила планирования: {}.\nПрочитай {}, если он есть; иначе {}.\nПредыдущий запуск: {}.\nАртефакты и checkpoint текущего запуска сохраняй в {}.\n\nКоманда панели (из любого cwd): {}\nВ progress/block/finish/memory-add указывай --run {}.\nДля памяти: memory-list --project {} --query 'тема' --limit 10; читай только нужные записи.\nСамостоятельный finish оставляет review; complete требует поручения пользователя.\n",
+        "# Задача {}: {}\n\nЦель: {}\n\nКритерии готовности: {}\n\nСостояние панели: {}\nРесурсы программы: {}\nЗапуск: {}\nАдаптер: {}\nПрофиль: {}; выбор: {}.\nМодель: {}; reasoning effort: {}.\nПроект: {}\nРабочие деревья: {}\nЗавершение Git: {}; контракт: {}\nПриёмка: {}.\n\nДо работы прочитай контракт исполнителя: {}.\nПравила планирования: {}.\nПрочитай {}, если он есть; иначе {}.\nПредыдущий запуск: {}.\nАртефакты и checkpoint текущего запуска сохраняй в {}.\n\nКоманда панели (из любого cwd): {}\nВ progress/block/finish/memory-add указывай --run {}.\nДля памяти: memory-list --project {} --query 'тема' --limit 10; читай только нужные записи.\nСамостоятельный finish оставляет review; complete требует поручения пользователя.\n",
         s(t, "id"),
         s(t, "title"),
         s(t, "goal"),
@@ -771,6 +798,8 @@ pub fn assignment_text(c: &Context, r: &Value, t: &Value) -> Result<String> {
         c.program.display(),
         s(r, "id"),
         s(r, "adapter"),
+        r["profile"].as_str().unwrap_or("legacy"),
+        r["model_selection"],
         s(r, "model"),
         s(r, "reasoning_effort"),
         c.path("projects", s(t, "project"))?.display(),

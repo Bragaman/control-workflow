@@ -7,26 +7,26 @@
 
 | Слой | Файлы | Выбор |
 | --- | --- | --- |
-| Программа | bin/, config/defaults.json, docs/, skills/ | Физический путь bin/control-workflow; ресурсы доступны для чтения |
-| Пользователь | JSON с profiles, adapter, git_mode, agent_start_timeout_ms, state_root, bindings_root | --config, затем CONTROL_PLANE_CONFIG; без выбора — defaults.json |
+| Программа | bin/, config/defaults.json, config/model-policy.json, docs/, skills/ | Физический путь bin/control-workflow; ресурсы доступны для чтения |
+| Пользователь | JSON с model_policy, model_overrides (либо legacy profiles), adapter, git_mode, agent_start_timeout_ms, state_root, bindings_root | --config, затем CONTROL_PLANE_CONFIG; без выбора — defaults.json |
 | Машина | BINDINGS_ROOT/runtime.json, projects/ID.json и tasks/ID.json | --bindings-root, CONTROL_PLANE_BINDINGS, bindings_root из config, иначе STATE_ROOT/bindings |
 | Состояние | projects/, tasks/, runs/, memory/, notifications/, views/, status/, .control.lock | --state-root, CONTROL_PLANE_STATE, прежний CONTROL_PLANE_ROOT, state_root из config, иначе внешний каталог ОС |
 
-Пути в JSON должны быть абсолютными. Относительные пути параметров CLI и
+Пути state/bindings/runtime в JSON должны быть абсолютными. Путь model_policy
+может быть относительным к каталогу config. Относительные пути параметров CLI и
 переменных окружения разрешаются от текущего каталога. Для воспроизводимости
 используй абсолютные пути. Дочерний процесс получает выбранные state/config/bindings
 явными аргументами; запуск из собственного таба сохраняет их при complete.
 
-Пользовательский JSON объединяется с defaults.json; можно заменить отдельный
-профиль без копирования всей таблицы. Например:
+Пользовательский JSON объединяется с defaults.json. В новом экземпляре подключи
+политику и меняй отдельные поля через местные overrides:
 
 ```json
 {
   "git_mode": "branch",
-  "profiles": {
-    "implementation": {
-      "normal": {"model": "my-model", "reasoning_effort": "medium"}
-    }
+  "model_policy": "builtin",
+  "model_overrides": {
+    "profiles": {"terra": {"model": "my-model"}}
   }
 }
 ```
@@ -68,3 +68,5 @@ Markdown-конструкции не преобразуются.
 (иначе ~/.config/control-workflow/config.json); macOS — ~/Library/Application Support/control-workflow/config.json.
 Если этот файл есть, он читается автоматически; явный --config имеет приоритет.
 Отсутствующие bindings schema_version читаются как версия 1 для совместимости.
+
+Именованные профили, приоритеты и миграция: [model-policy.md](model-policy.md).

@@ -23,7 +23,7 @@ printf '{}\n' > /path/to/test-preferences.json
 
 Бинарник содержит ресурсы docs/skills/defaults и создаёт manifest с SHA-256. Готовая поставка не требует Python или Rust toolchain. `install --prefix PATH` создаёт новую установку либо обновляет только принадлежащую Rust-установщику: проверяет manifest, запрещает неизвестные файлы и symlink, сохраняет прежний каталог в backup. Возврат выполняется заменой программного каталога на этот backup при остановленных клиентах. Состояние не переносится. Каталог с файлами другой программы нельзя указывать как prefix.
 
-Приоритет путей: аргументы CLI, CONTROL_PLANE_STATE/CONTROL_PLANE_CONFIG/CONTROL_PLANE_BINDINGS (прежнее CONTROL_PLANE_ROOT), пользовательский config, платформенные значения по умолчанию. На Linux используются XDG_STATE_HOME/XDG_CONFIG_HOME, на macOS — `~/Library/Application Support/control-workflow`. `--program-root` или CONTROL_WORKFLOW_PROGRAM задаёт каталог ресурсов; установленный бинарник определяет его как родителя bin. В config и runtime используются прежние поля, включая adapter, profiles, cwd, worktrees_root и herdr_executable.
+Приоритет путей: аргументы CLI, CONTROL_PLANE_STATE/CONTROL_PLANE_CONFIG/CONTROL_PLANE_BINDINGS (прежнее CONTROL_PLANE_ROOT), пользовательский config, платформенные значения по умолчанию. На Linux используются XDG_STATE_HOME/XDG_CONFIG_HOME, на macOS — `~/Library/Application Support/control-workflow`. `--program-root` или CONTROL_WORKFLOW_PROGRAM задаёт каталог ресурсов; установленный бинарник определяет его как родителя bin. В config и runtime используются прежние поля, включая adapter, model_policy, model_overrides, legacy profiles, cwd, worktrees_root и herdr_executable.
 
 Файл test-preferences.json с пустым JSON-объектом использует встроенные defaults; собственные профили можно задать по examples/config-codex.json или examples/config-claude.json в checkout. Для команд herdr создайте отдельную тестовую сессию (команда herdr session attach sandbox в отдельном терминале) и проверьте имя через `herdr session list --json`. Параметры MCP ниже используют эту сессию; не указывайте рабочую сессию для испытаний.
 
@@ -92,3 +92,5 @@ config/runtime закрепляются при запуске процесса, 
 ```
 
 Карта появляется только при наличии таких чисел; обычная строка "Infinity" в неё не входит. Пути относятся к result, используют экранирование JSON Pointer (~0 для ~, ~1 для /) и десятичные индексы массивов.
+
+Переносимая политика и явный profile в CLI/MCP: [model-policy.md](model-policy.md).

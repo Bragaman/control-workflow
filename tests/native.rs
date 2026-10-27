@@ -17,6 +17,54 @@ fn context(dir: &Path) -> Context {
         .unwrap();
     Context::load(&m).unwrap()
 }
+
+#[test]
+fn portable_policy_validation_precedence_and_legacy_compatibility() {
+    use control_workflow::{core, policy};
+    let temp = tempfile::tempdir().unwrap();
+    let mut c = context(temp.path());
+    let task = json!({"task_kind":"research","complexity":"complex"});
+    let legacy = core::profile(&c, &task).unwrap();
+    assert_eq!(legacy["model"], "default");
+    assert_eq!(legacy["model_selection"]["source"], "legacy");
+    let local = json!({"model_policy":"builtin","model_overrides":{"profiles":{"luna":{"reasoning_effort":"high"}}}});
+    policy::load(&mut c.settings, None, &local).unwrap();
+    let auto = core::profile(&c, &task).unwrap();
+    assert_eq!(auto["profile"], "sol-high");
+    let mut selected = task.clone();
+    selected["profile"] = json!("terra");
+    assert_eq!(
+        core::profile(&c, &selected).unwrap()["model"],
+        "gpt-6.1-terra"
+    );
+    let run = core::profile_for_run(&c, &selected, Some("luna")).unwrap();
+    assert_eq!(run["model"], "gpt-6-luna");
+    assert_eq!(run["reasoning_effort"], "high");
+    assert_eq!(run["model_selection"]["source"], "run");
+    assert!(policy::check_reuse(Some(&run), &auto).is_err());
+    assert!(policy::check_reuse(Some(&run), &run).is_ok());
+    assert!(core::profile_for_run(&c, &task, Some("missing")).is_err());
+    for bad in [
+        json!({"model_policy":null}),
+        json!({"model_policy":"builtin","profiles":{}}),
+        json!({"model_overrides":{}}),
+        json!({"model_policy":"builtin","model_overrides":{"cwd":"/host"}}),
+        json!({"model_policy":"builtin","model_overrides":{"profiles":{"luna":{"reasoning_effort":"typo"}}}}),
+        json!({"model_policy":"builtin","model_overrides":{"profiles":{"luna":{"model":"default"}}}}),
+        json!({"model_policy":"builtin","model_overrides":{"profiles":{"luna":{"model":"/bad model"}}}}),
+        json!({"model_policy":"builtin","model_overrides":{"rules":{"research":{"normal":"typo"}}}}),
+        json!({"model_policy":"builtin","model_overrides":{"profiles":null}}),
+        json!({"model_policy":"builtin","allowed_models":"sol"}),
+    ] {
+        assert!(
+            policy::load(&mut c.settings.clone(), None, &bad).is_err(),
+            "accepted {bad}"
+        );
+    }
+    c.settings["allowed_models"] = json!(["gpt-6-luna"]);
+    assert!(core::profile(&c, &task).is_err());
+    assert!(core::profile_for_run(&c, &task, Some("luna")).is_ok());
+}
 #[test]
 fn preserve_unknown_fields_and_split_bindings() {
     let temp = tempfile::tempdir().unwrap();
