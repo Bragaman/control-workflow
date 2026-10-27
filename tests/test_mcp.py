@@ -1,9 +1,7 @@
 """The established lifecycle contract driven through actual stdio MCP calls."""
 import argparse
 import json
-import os
 from pathlib import Path
-import unittest
 import test_control as fixture
 from mcp_client import Client
 

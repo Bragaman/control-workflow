@@ -50,20 +50,23 @@ complete закрывает задачу и сохраняет код по вы�
 [Контракт исполнителя](docs/worker.md), [восстановление](docs/recovery.md) и
 [Git-приёмка](docs/git-policy.md) описывают этот порядок подробнее.
 
-## Пример
-
-В вымышленном проекте «Справочник» пользователь выбирает задачу «Проверить
-инструкцию». Цель — найти неоднозначные шаги; критерий — отчёт с примерами и
-предложениями. Управляющий открывает эту задачу, исполнитель сохраняет план,
-проверяет текст и передаёт отчёт через finish. Пользователь читает результат,
-просит уточнить один шаг, затем поручает complete. В хранилище остаются задание,
-план, отчёт и решения. [Пример команд](examples/task.md) воспроизводит такой цикл
-в отдельном экземпляре без изменения кода.
+[Пример команд](examples/task.md) воспроизводит этот цикл в отдельном экземпляре
+без изменения кода.
 
 ## Первый запуск
 
 Нужны Linux/macOS, herdr и авторизованный CLI агента; для задач с кодом —
-Git. Готовая поставка работает без Python и Rust toolchain.
+Git. Для сборки из исходников установи Rust 1.91.0 и linker платформы
+(на macOS — Xcode Command Line Tools). Из корня checkout:
+
+```sh
+cargo build --locked --release
+target/release/control-workflow install --prefix "$HOME/.local/share/control-workflow/program"
+```
+
+Готовая поставка работает без Python и Rust toolchain. Для обновления собери
+новый бинарник и повтори install с прежним prefix: установщик проверяет старые
+файлы, сохраняет backup и оставляет state/config/bindings на месте.
 [Пошаговая установка](docs/install.md) ведёт от установки зависимостей до новой
 сессии herdr и управляющего Codex с восемью скиллами и явно выбранным экземпляром.
 
@@ -72,6 +75,31 @@ Git. Готовая поставка работает без Python и Rust tool
 запуски и память создаются в своём state; credentials остаются в штатном
 хранилище CLI провайдера. Пути показывает environment:
 [выбор экземпляра](docs/control-entry.md), [расположение данных](docs/runtime-layout.md).
+
+CLI принимает пути перед подкомандой. Для нового экземпляра в свободных каталогах
+создай config по примеру и проверь выбранные пути:
+
+```sh
+mkdir -p "$HOME/.config/control-workflow-demo"
+cp "$HOME/.local/share/control-workflow/program/examples/config-codex.json" \
+  "$HOME/.config/control-workflow-demo/config.json"
+"$HOME/.local/share/control-workflow/program/bin/control-workflow" \
+  --state-root "$HOME/.local/state/control-workflow-demo" \
+  --bindings-root "$HOME/.local/state/control-workflow-demo-bindings" \
+  --config "$HOME/.config/control-workflow-demo/config.json" environment
+```
+
+В выводе environment сверь state_root, bindings_root и config с выбранными путями.
+Для подключения MCP stdio используй те же параметры и подкоманду mcp;
+пример конфигурации клиента — в [инструкции CLI/MCP](docs/rust.md).
+При вызове панели вне herdr передавай --herdr-session NAME перед подкомандой.
+
+Для встроенной политики моделей добавь `"model_policy": "builtin"`
+в пользовательский config. Она выбирает sol для normal и sol-high для complex;
+пример Codex уже включает её. Именованный профиль задаётся, например,
+через --profile sol-high при создании задачи или запуске; без политики
+сохраняются прежние настройки. [Профили и миграция config](docs/model-policy.md)
+описывают выбор модели, локальные переопределения и ограничения.
 
 ## Возможности скиллов
 
@@ -101,22 +129,25 @@ Claude Code — экспериментальный адаптер без при�
 ## Проверки исходников
 
 ```sh
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
-cargo build --locked
-CONTROL_WORKFLOW_BIN="$PWD/target/debug/control-workflow" PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
-python3 scripts/release_audit.py
+python3 -m venv target/check-venv
+. target/check-venv/bin/activate
+python3 -m pip install -r requirements-dev.txt
+sh scripts/check.sh
 ```
 
-Python 3.10+ нужен разработчику для независимых контрактных тестов и аудита.
+Общая команда для локальной проверки и CI выполняет Rust fmt/clippy,
+Ruff, Rust-тесты, release-сборку, аудит и Python-контракты с release-бинарником.
+Ruff проверяет синтаксис, неиспользуемые импорты и неопределённые имена
+в тестах и аудите; версия закреплена в requirements-dev.txt.
+Python 3.10+ и модуль venv нужны разработчику для этих проверок.
 Тесты вызывают Rust CLI/MCP, используют временные Git/state/config/bindings и fake herdr;
 модели и табы herdr не запускаются. CI настроен на Linux/macOS x86_64/ARM64;
 наличие workflow не означает успешный запуск CI. Release audit сверяет
 положительный список файлов, хеши, локальные Markdown-ссылки и все достижимые
 Git-деревья по встроенным шаблонам секретов и личных данных. Такой поиск не
 гарантирует обнаружения произвольного секрета; метаданные Git требуют отдельной
-проверки перед публикацией.
+проверки перед публикацией. После изменения файлов поставки обнови хеши командой
+`python3 scripts/release_audit.py --write-manifest` и повтори проверку.
 
 ## Лицензия
 

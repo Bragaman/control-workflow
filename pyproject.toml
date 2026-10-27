@@ -1,0 +1,8 @@
+[tool.ruff]
+target-version = "py310"
+cache-dir = "target/ruff"
+include = ["scripts/*.py", "tests/*.py"]
+
+[tool.ruff.lint]
+# Catch syntax, undefined names and unused code in contract tests and audit tools.
+select = ["E9", "F"]

@@ -9,21 +9,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - uses: dtolnay/rust-toolchain@1.91.0
         with:
           components: rustfmt, clippy
-      - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
-      - run: cargo build --locked --release
-      - run: python scripts/release_audit.py
-      - run: python -m unittest discover -s tests -v
-        env:
-          CONTROL_WORKFLOW_BIN: ${{ github.workspace }}/target/release/control-workflow
-          PYTHONDONTWRITEBYTECODE: '1'
+      - run: python3 -m pip install -r requirements-dev.txt
+      - run: sh scripts/check.sh
       - run: target/release/control-workflow package --prefix "$RUNNER_TEMP/control-workflow-native"
       - run: |
           tar -czf control-workflow-${{ runner.os }}-${{ runner.arch }}.tar.gz -C "$RUNNER_TEMP/control-workflow-native" .

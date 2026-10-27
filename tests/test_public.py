@@ -1,6 +1,4 @@
 """Distribution, isolated install/update and Claude lifecycle acceptance with fake herdr."""
-import ctypes
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -50,7 +48,7 @@ class PublicInstallTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='public-install-')
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(('CONTROL_PLANE_', 'HERDR_'))}
         self.env.update(HOME=str(self.root), PYTHONDONTWRITEBYTECODE='1', XDG_CONFIG_HOME=str(self.root / 'config'),
                         XDG_STATE_HOME=str(self.root / 'state'))
