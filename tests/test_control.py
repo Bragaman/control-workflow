@@ -1,11 +1,9 @@
 import json
 import hashlib
-import shutil
 import os
 import shlex
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
@@ -131,7 +129,7 @@ class ControlTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         fake = bin_dir / "herdr"
@@ -147,6 +145,32 @@ class ControlTests(unittest.TestCase):
         self.env = {**self.env, 'CONTROL_PLANE_CONFIG': str(test_config), "CONTROL_PLANE_ROOT": str(self.root), "HERDR_ENV": "1", "HERDR_SOCKET_PATH": str(self.log) + ".sock",
                     "FAKE_LOG": str(self.log), "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]}
         self.cli("project-create", "lab", "--name", "Лаборатория")
+        self.addCleanup(ControlTests.wait_workers, self, self.root)
+
+    def wait_workers(self, root):
+        # A final status may be saved before the detached worker finishes writing.
+        if getattr(self, 'client', None):
+            self.close_client()
+        pids = set()
+        for name, field in [('state.json', 'worker_pid'), ('completion-request.json', 'pid')]:
+            for path in root.rglob(name):
+                try:
+                    record = json.loads(path.read_text())
+                except (FileNotFoundError, json.JSONDecodeError):
+                    continue
+                if isinstance(record, dict) and isinstance(record.get(field), int):
+                    if record[field] > 0 and record[field] != os.getpid():
+                        pids.add(record[field])
+        deadline = time.monotonic() + 10
+        while pids:
+            for pid in list(pids):
+                result = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='],
+                                        capture_output=True, text=True, check=False)
+                if not result.stdout.strip() or result.stdout.strip().startswith('Z'):
+                    pids.remove(pid)
+            if pids:
+                self.assertLess(time.monotonic(), deadline, f'Workers still running: {pids}')
+                time.sleep(0.03)
 
     def cli(self, *args, ok=True, env=None):
         result = subprocess.run([str(BINARY), *args], env=env or self.env,

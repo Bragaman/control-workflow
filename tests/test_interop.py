@@ -9,7 +9,6 @@ import struct
 import os
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
@@ -25,7 +24,7 @@ class InteropTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='workflow-interop-')
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.state = self.root / 'state'
         self.bindings = self.root / 'bindings'
         self.config = self.root / 'config.json'

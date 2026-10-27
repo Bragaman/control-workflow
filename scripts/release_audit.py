@@ -13,10 +13,13 @@ SCRIPTS = ('control', 'completion_git', 'install_skills', 'artifact_links', 'her
            'runtime_config', 'platform_support', 'agent_adapters', 'herdr_claude', 'install',
            'doctor', 'release_audit', 'agent_review')
 DOCS = ('worker', 'planning', 'control-entry', 'git-policy', 'recovery', 'runtime-layout',
-        'agent-review', 'install', 'architecture', 'compatibility', 'questions', 'task-profile')
+        'agent-review', 'install', 'architecture', 'compatibility', 'questions', 'task-profile',
+        'model-policy')
 SKILLS = ('list', 'project', 'task', 'start', 'review', 'complete', 'memory', 'sync')
 ALLOWLIST = ({'README.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', '.gitignore',
-              'config/defaults.json', 'examples/config-codex.json', 'examples/config-claude.json',
+              'config/defaults.json', 'config/model-policy.json',
+              'pyproject.toml', 'requirements-dev.txt', 'scripts/check.sh',
+              'examples/config-codex.json', 'examples/config-claude.json',
               'examples/project.json', 'examples/task.md', '.github/workflows/check.yml',
               'skills/control-sync/references/checks.md'} |
              {'scripts/' + name + '.py' for name in SCRIPTS} |
@@ -25,10 +28,11 @@ ALLOWLIST = ({'README.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', '.gitignore',
              {'tests/test_' + name + '.py' for name in ('control', 'runtime', 'public')})
 NATIVE_FILES = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
                 '.github/workflows/rust.yml', 'docs/rust.md', 'tests/native.rs',
-                'tests/test_native.py', 'tests/test_mcp.py', 'tests/test_interop.py', 'tests/mcp_client.py'} | {
+                'tests/test_native.py', 'tests/test_mcp.py', 'tests/test_interop.py',
+                'tests/test_model_policy.py', 'tests/mcp_client.py'} | {
     'src/' + name for name in ('args.rs', 'casefold.rs', 'commands.json', 'config.rs', 'core.rs',
                                'external.rs', 'git.rs', 'lib.rs', 'lifecycle.rs',
-                               'main.rs', 'mcp.rs', 'resources.rs', 'review.rs', 'shipping.rs', 'store.rs')}
+                               'main.rs', 'mcp.rs', 'policy.rs', 'resources.rs', 'review.rs', 'shipping.rs', 'store.rs')}
 ALLOWLIST |= NATIVE_FILES
 # The original license placeholder remains valid only in preserved historical trees.
 HISTORY_ALLOWLIST = ALLOWLIST | {'LICENSE.pending'}

@@ -103,7 +103,11 @@ fn native_package_is_independent_and_rejects_foreign_files() {
     let temp = tempfile::tempdir().unwrap();
     let c = context(temp.path());
     let exe = env!("CARGO_BIN_EXE_control-workflow");
-    let prefix = temp.path().join("standalone");
+    let real = temp.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let alias = temp.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let prefix = alias.join("standalone");
     let result = Command::new(exe)
         .args([
             "--state-root",
@@ -137,7 +141,10 @@ fn native_package_is_independent_and_rejects_foreign_files() {
         .unwrap();
     assert!(result.status.success());
     let env: Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(env["program_root"], json!(prefix));
+    assert_eq!(
+        env["program_root"],
+        json!(real.canonicalize().unwrap().join("standalone"))
+    );
     assert!(!prefix.join("scripts").exists());
     for name in [
         "README.md",
@@ -195,15 +202,18 @@ fn unicode_casefold_matches_search_contract() {
 #[test]
 fn paths_resolve_parent_components_and_broken_symlinks() {
     let temp = tempfile::tempdir().unwrap();
-    let input = temp.path().join("missing/../state");
+    let base = temp.path().canonicalize().unwrap();
+    let alias = temp.path().join("alias");
+    std::os::unix::fs::symlink(&base, &alias).unwrap();
+    let input = alias.join("missing/../state");
     assert_eq!(
         control_workflow::config::location(&input).unwrap(),
-        temp.path().join("state")
+        base.join("state")
     );
     std::os::unix::fs::symlink("absent-target", temp.path().join("link")).unwrap();
     assert_eq!(
-        control_workflow::config::location(temp.path().join("link")).unwrap(),
-        temp.path().join("absent-target")
+        control_workflow::config::location(alias.join("link")).unwrap(),
+        base.join("absent-target")
     );
 }
 
@@ -259,7 +269,12 @@ fn installation_update_backup_and_skill_conflicts_are_preserved() {
         Path::new(exe),
         &["install", "--prefix", prefix.to_str().unwrap()],
     );
-    assert!(updated.status.success());
+    assert!(
+        updated.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&updated.stdout),
+        String::from_utf8_lossy(&updated.stderr)
+    );
     let output: Value = serde_json::from_slice(&updated.stdout).unwrap();
     assert!(Path::new(output["backup"].as_str().unwrap()).is_dir());
     assert_eq!(
