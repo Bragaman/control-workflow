@@ -19,3 +19,4 @@ __pycache__/
 .control.lock
 *.log
 .DS_Store
+/target/

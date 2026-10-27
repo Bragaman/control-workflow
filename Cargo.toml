@@ -1,0 +1,25 @@
+[package]
+name = "control-workflow"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT"
+description = "File-backed control workflow with native CLI and MCP stdio"
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["string"] }
+libc = "0.2"
+regex = "1"
+ryu = "1"
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+sha2 = "0.10"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+percent-encoding = "2"
+pathdiff = "0.2"
+
+[profile.release]
+lto = "thin"
+strip = true

@@ -1,0 +1,1567 @@
+[
+  {
+    "name": "environment",
+    "options": []
+  },
+  {
+    "name": "materialize-bindings",
+    "options": []
+  },
+  {
+    "name": "project-create",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "name",
+        "flags": [
+          "--name"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "description",
+        "flags": [
+          "--description"
+        ],
+        "required": false,
+        "default": "",
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "project-set",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "name",
+        "flags": [
+          "--name"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "description",
+        "flags": [
+          "--description"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "cwd",
+        "flags": [
+          "--cwd"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "repo",
+        "flags": [
+          "--repo"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": true,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "workspace",
+        "flags": [
+          "--workspace"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "clear_workspace",
+        "flags": [
+          "--clear-workspace"
+        ],
+        "required": false,
+        "default": false,
+        "choices": null,
+        "multiple": false,
+        "boolean": true,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "projects",
+    "options": [
+      {
+        "name": "project",
+        "flags": [
+          "--project"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "status",
+        "flags": [
+          "--status"
+        ],
+        "required": false,
+        "default": null,
+        "choices": [
+          "backlog",
+          "ready",
+          "running",
+          "blocked",
+          "review",
+          "done",
+          "cancelled"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "all",
+        "flags": [
+          "--all"
+        ],
+        "required": false,
+        "default": false,
+        "choices": null,
+        "multiple": false,
+        "boolean": true,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "tasks",
+    "options": [
+      {
+        "name": "project",
+        "flags": [
+          "--project"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "status",
+        "flags": [
+          "--status"
+        ],
+        "required": false,
+        "default": null,
+        "choices": [
+          "backlog",
+          "ready",
+          "running",
+          "blocked",
+          "review",
+          "done",
+          "cancelled"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "all",
+        "flags": [
+          "--all"
+        ],
+        "required": false,
+        "default": false,
+        "choices": null,
+        "multiple": false,
+        "boolean": true,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "review-request",
+    "options": [
+      {
+        "name": "run",
+        "flags": [
+          "--run"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "artifact",
+        "flags": [
+          "--artifact"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": true,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "review-show",
+    "options": [
+      {
+        "name": "run",
+        "flags": [
+          "--run"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "latest",
+        "flags": [
+          "--latest"
+        ],
+        "required": false,
+        "default": false,
+        "choices": null,
+        "multiple": false,
+        "boolean": true,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "review-read",
+    "options": [
+      {
+        "name": "run",
+        "flags": [
+          "--run"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "id",
+        "flags": [
+          "--id"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "section",
+        "flags": [
+          "--section"
+        ],
+        "required": false,
+        "default": "entry",
+        "choices": [
+          "entry",
+          "files",
+          "diff",
+          "blob",
+          "manifest"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "path",
+        "flags": [
+          "--path"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "repository",
+        "flags": [
+          "--repository"
+        ],
+        "required": false,
+        "default": 0,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": true
+      }
+    ]
+  },
+  {
+    "name": "review-claim",
+    "options": [
+      {
+        "name": "run",
+        "flags": [
+          "--run"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "id",
+        "flags": [
+          "--id"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "actor",
+        "flags": [
+          "--actor"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "lease",
+        "flags": [
+          "--lease"
+        ],
+        "required": false,
+        "default": 900,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": true
+      }
+    ]
+  },
+  {
+    "name": "review-conclude",
+    "options": [
+      {
+        "name": "run",
+        "flags": [
+          "--run"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "id",
+        "flags": [
+          "--id"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "actor",
+        "flags": [
+          "--actor"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "result",
+        "flags": [
+          "--result"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "review-feedback",
+    "options": [
+      {
+        "name": "run",
+        "flags": [
+          "--run"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "id",
+        "flags": [
+          "--id"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "delivered",
+        "flags": [
+          "--delivered"
+        ],
+        "required": false,
+        "default": false,
+        "choices": null,
+        "multiple": false,
+        "boolean": true,
+        "integer": false
+      },
+      {
+        "name": "user_requested",
+        "flags": [
+          "--user-requested"
+        ],
+        "required": false,
+        "default": false,
+        "choices": null,
+        "multiple": false,
+        "boolean": true,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "task-create",
+    "options": [
+      {
+        "name": "compact",
+        "flags": [
+          "--compact"
+        ],
+        "required": false,
+        "default": false,
+        "choices": null,
+        "multiple": false,
+        "boolean": true,
+        "integer": false
+      },
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "project",
+        "flags": [
+          "--project"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "title",
+        "flags": [
+          "--title"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "goal",
+        "flags": [
+          "--goal"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "acceptance",
+        "flags": [
+          "--acceptance"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "code",
+        "flags": [
+          "--code",
+          "--no-code"
+        ],
+        "required": false,
+        "default": false,
+        "choices": null,
+        "multiple": false,
+        "boolean": true,
+        "integer": false
+      },
+      {
+        "name": "repo",
+        "flags": [
+          "--repo"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": true,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "git_mode",
+        "flags": [
+          "--git-mode"
+        ],
+        "required": false,
+        "default": null,
+        "choices": [
+          "main",
+          "branch"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "agent_review_policy",
+        "flags": [
+          "--agent-review-policy"
+        ],
+        "required": false,
+        "default": "manual",
+        "choices": [
+          "off",
+          "manual",
+          "auto"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "depends",
+        "flags": [
+          "--depends"
+        ],
+        "required": false,
+        "default": [],
+        "choices": null,
+        "multiple": true,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "task_kind",
+        "flags": [
+          "--task-kind"
+        ],
+        "required": false,
+        "default": null,
+        "choices": [
+          "research",
+          "reasoning",
+          "planning",
+          "implementation"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "complexity",
+        "flags": [
+          "--complexity"
+        ],
+        "required": false,
+        "default": "normal",
+        "choices": [
+          "normal",
+          "complex"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "task-set",
+    "options": [
+      {
+        "name": "compact",
+        "flags": [
+          "--compact"
+        ],
+        "required": false,
+        "default": false,
+        "choices": null,
+        "multiple": false,
+        "boolean": true,
+        "integer": false
+      },
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "title",
+        "flags": [
+          "--title"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "goal",
+        "flags": [
+          "--goal"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "acceptance",
+        "flags": [
+          "--acceptance"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "agent_review_policy",
+        "flags": [
+          "--agent-review-policy"
+        ],
+        "required": false,
+        "default": null,
+        "choices": [
+          "off",
+          "manual",
+          "auto"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "reviewer",
+        "flags": [
+          "--reviewer"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "status",
+        "flags": [
+          "--status"
+        ],
+        "required": false,
+        "default": null,
+        "choices": [
+          "backlog",
+          "ready",
+          "cancelled"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "code",
+        "flags": [
+          "--code",
+          "--no-code"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": true,
+        "integer": false
+      },
+      {
+        "name": "repo",
+        "flags": [
+          "--repo"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": true,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "git_mode",
+        "flags": [
+          "--git-mode"
+        ],
+        "required": false,
+        "default": null,
+        "choices": [
+          "main",
+          "branch"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "task_kind",
+        "flags": [
+          "--task-kind"
+        ],
+        "required": false,
+        "default": null,
+        "choices": [
+          "research",
+          "reasoning",
+          "planning",
+          "implementation"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "complexity",
+        "flags": [
+          "--complexity"
+        ],
+        "required": false,
+        "default": null,
+        "choices": [
+          "normal",
+          "complex"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "show",
+    "options": [
+      {
+        "name": "kind",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": [
+          "projects",
+          "tasks"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "start",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "open",
+    "options": [
+      {
+        "name": "ids",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": true,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "run",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "compact",
+        "flags": [
+          "--compact"
+        ],
+        "required": false,
+        "default": false,
+        "choices": null,
+        "multiple": false,
+        "boolean": true,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "plan",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "file",
+        "flags": [
+          "--file"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "pane",
+        "flags": [
+          "--pane"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "recover-start",
+    "options": [
+      {
+        "name": "run",
+        "flags": [
+          "--run"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "_launch",
+    "options": [
+      {
+        "name": "run",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "progress",
+    "options": [
+      {
+        "name": "run",
+        "flags": [
+          "--run"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "text",
+        "flags": [
+          "--text"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "block",
+    "options": [
+      {
+        "name": "run",
+        "flags": [
+          "--run"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "question",
+        "flags": [
+          "--question"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "checkpoint",
+        "flags": [
+          "--checkpoint"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "answer",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "text",
+        "flags": [
+          "--text"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "interrupt",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "reason",
+        "flags": [
+          "--reason"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "finish",
+    "options": [
+      {
+        "name": "run",
+        "flags": [
+          "--run"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "report",
+        "flags": [
+          "--report"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "decisions",
+        "flags": [
+          "--decisions"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "artifact",
+        "flags": [
+          "--artifact"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": true,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "accept",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "by",
+        "flags": [
+          "--by"
+        ],
+        "required": false,
+        "default": "user",
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "note",
+        "flags": [
+          "--note"
+        ],
+        "required": false,
+        "default": "",
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "complete",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "status",
+        "flags": [
+          "--status"
+        ],
+        "required": false,
+        "default": "done",
+        "choices": [
+          "done",
+          "cancelled"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "by",
+        "flags": [
+          "--by"
+        ],
+        "required": false,
+        "default": "user",
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "note",
+        "flags": [
+          "--note"
+        ],
+        "required": false,
+        "default": "",
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "commit_message",
+        "flags": [
+          "--commit-message"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "_complete-request",
+    "options": [
+      {
+        "name": "run",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "token",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "memory-add",
+    "options": [
+      {
+        "name": "project",
+        "flags": [
+          "--project"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "title",
+        "flags": [
+          "--title"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "kind",
+        "flags": [
+          "--kind"
+        ],
+        "required": false,
+        "default": "knowledge",
+        "choices": [
+          "decision",
+          "knowledge",
+          "work"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "run",
+        "flags": [
+          "--run"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "text",
+        "flags": [
+          "--text"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "file",
+        "flags": [
+          "--file"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "memory-list",
+    "options": [
+      {
+        "name": "project",
+        "flags": [
+          "--project"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "query",
+        "flags": [
+          "--query"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "limit",
+        "flags": [
+          "--limit"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": true
+      },
+      {
+        "name": "offset",
+        "flags": [
+          "--offset"
+        ],
+        "required": false,
+        "default": 0,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": true
+      }
+    ]
+  },
+  {
+    "name": "notifications",
+    "options": []
+  },
+  {
+    "name": "notice-ack",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "mcp",
+    "options": []
+  },
+  {
+    "name": "doctor",
+    "options": []
+  },
+  {
+    "name": "install",
+    "options": [
+      {
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false,
+        "name": "prefix",
+        "flags": [
+          "--prefix"
+        ],
+        "required": true
+      }
+    ]
+  },
+  {
+    "name": "package",
+    "options": [
+      {
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false,
+        "name": "prefix",
+        "flags": [
+          "--prefix"
+        ],
+        "required": true
+      }
+    ]
+  },
+  {
+    "name": "skills",
+    "options": [
+      {
+        "name": "destination",
+        "flags": [
+          "--destination"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "action",
+        "flags": [
+          "--action"
+        ],
+        "required": false,
+        "default": "install",
+        "choices": [
+          "install",
+          "check",
+          "remove"
+        ],
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  }
+]

@@ -1,0 +1,43 @@
+name: native-rust
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --locked --release
+      - run: python -m unittest discover -s tests -p 'test_native.py' -v
+        env:
+          CONTROL_WORKFLOW_BIN: ${{ github.workspace }}/target/release/control-workflow
+          PYTHONDONTWRITEBYTECODE: '1'
+      - run: python -m unittest discover -s tests -p 'test_mcp.py' -v
+        env:
+          CONTROL_WORKFLOW_BIN: ${{ github.workspace }}/target/release/control-workflow
+          PYTHONDONTWRITEBYTECODE: '1'
+      - run: python -m unittest discover -s tests -p 'test_interop.py' -v
+        env:
+          CONTROL_WORKFLOW_BIN: ${{ github.workspace }}/target/release/control-workflow
+          PYTHONDONTWRITEBYTECODE: '1'
+      - run: target/release/control-workflow package --prefix "$RUNNER_TEMP/control-workflow-native"
+      - run: |
+          tar -czf control-workflow-${{ runner.os }}-${{ runner.arch }}.tar.gz -C "$RUNNER_TEMP/control-workflow-native" .
+          shasum -a 256 control-workflow-*.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            control-workflow-*.tar.gz
+            SHA256SUMS

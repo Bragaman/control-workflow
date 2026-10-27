@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -22,6 +23,13 @@ ALLOWLIST = ({'README.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', '.gitignore',
              {'docs/' + name + '.md' for name in DOCS} |
              {'skills/control-' + name + '/SKILL.md' for name in SKILLS} |
              {'tests/test_' + name + '.py' for name in ('control', 'runtime', 'public')})
+NATIVE_FILES = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
+                '.github/workflows/rust.yml', 'docs/rust.md', 'tests/native.rs',
+                'tests/test_native.py', 'tests/test_mcp.py', 'tests/test_interop.py', 'tests/mcp_client.py'} | {
+    'src/' + name for name in ('args.rs', 'casefold.rs', 'commands.json', 'config.rs', 'core.rs',
+                               'external.rs', 'git.rs', 'lib.rs', 'lifecycle.rs',
+                               'main.rs', 'mcp.rs', 'resources.rs', 'review.rs', 'shipping.rs', 'store.rs')}
+ALLOWLIST |= NATIVE_FILES
 # The original license placeholder remains valid only in preserved historical trees.
 HISTORY_ALLOWLIST = ALLOWLIST | {'LICENSE.pending'}
 PRIVATE = re.compile(r'/home/(?:dm|[a-z][a-z0-9_-]*)/|run-[a-f0-9]{12}|'
@@ -55,14 +63,17 @@ def main():
     a = p.parse_args()
     root = Path(__file__).resolve().parents[1]
     actual = set()
-    for file in root.rglob('*'):
-        rel = str(file.relative_to(root))
-        if rel == '.git' or rel.startswith('.git/'):
-            continue
-        if file.is_symlink():
-            raise ValueError('Symlink: ' + rel)
-        if file.is_file():
-            actual.add(rel)
+    for directory, folders, names in os.walk(root, followlinks=False):
+        relative = Path(directory).relative_to(root)
+        folders[:] = [name for name in folders if name != '__pycache__'
+                      and not (relative == Path('.') and name in ('.git', 'target'))]
+        for name in [*folders, *names]:
+            file = Path(directory) / name
+            rel = str(file.relative_to(root))
+            if file.is_symlink():
+                raise ValueError('Symlink: ' + rel)
+            if file.is_file() and rel != '.git':
+                actual.add(rel)
     missing = ALLOWLIST - actual
     unexpected = actual - ALLOWLIST - {'distribution.json'}
     if missing or unexpected:
