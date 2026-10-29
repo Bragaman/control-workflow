@@ -1063,6 +1063,23 @@
     ]
   },
   {
+    "name": "recover-review",
+    "options": [
+      {
+        "name": "run",
+        "flags": [
+          "--run"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
     "name": "_launch",
     "options": [
       {

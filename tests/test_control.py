@@ -1189,6 +1189,92 @@ class ControlTests(unittest.TestCase):
         self.cli("finish", "--run", r["id"], "--report", str(report))
         return r
 
+    def legacy_ready_review(self, with_review=False):
+        # Existing installations can contain this state after task-set --status ready.
+        r = self.review()
+        if with_review:
+            self.cli("review-request", "--run", r["id"])
+        file = self.root / "tasks/task1.json"
+        task = json.loads(file.read_text())
+        task["status"] = "ready"
+        file.write_text(json.dumps(task))
+        return r
+
+    def test_recover_review_preserves_result_and_completes_legacy_state(self):
+        r = self.legacy_ready_review(with_review=True)
+        directory = self.root / "runs" / r["id"]
+        before = {p: p.read_bytes() for p in directory.rglob("*") if p.is_file()}
+        memory = self.cli("memory-list", "--project", "lab")
+        err = self.cli("complete", "task1", ok=False)
+        self.assertIn("Сначала нужен результат в review", err["error"])
+        err = self.cli("finish", "--run", r["id"], "--report", str(self.root / "report.md"), ok=False)
+        self.assertIn("Запуск не выполняется", err["error"])
+        result = self.cli("recover-review", "--run", r["id"])
+        self.assertEqual(result["status"], "review")
+        self.assertEqual(self.cli("show", "tasks", "task1")["status"], "review")
+        for p, data in before.items():
+            self.assertEqual(p.read_bytes(), data, str(p))
+        self.assertEqual(self.cli("memory-list", "--project", "lab"), memory)
+        recovery = directory / "review-recovery.json"
+        saved = recovery.read_bytes()
+        self.assertEqual(json.loads(saved)["previous_task_status"], "ready")
+        self.cli("recover-review", "--run", r["id"])
+        self.assertEqual(recovery.read_bytes(), saved)
+        self.cli("complete", "task1", "--by", "someone", ok=False)
+        self.assertEqual(self.cli("complete", "task1")["status"], "done")
+        self.cli("recover-review", "--run", r["id"], ok=False)
+
+    def test_task_set_leaves_review_without_leaving_reviewable_run(self):
+        for status in ("ready", "backlog", "cancelled"):
+            self.create(status)
+            run = self.start(status)
+            report = self.root / "report.md"
+            report.write_text("Проверенный результат")
+            self.cli("finish", "--run", run["id"], "--report", str(report))
+            directory = self.root / "runs" / run["id"]
+            state = (directory / "state.json").read_bytes()
+            self.cli("task-set", status, "--goal", "Новая цель")
+            self.assertEqual((directory / "state.json").read_bytes(), state)
+            self.cli("task-set", status, "--status", status)
+            expected = "cancelled" if status == "cancelled" else "interrupted"
+            self.assertEqual(self.cli("run", run["id"])["status"], expected)
+            self.assertEqual((directory / "result.md").read_text(), report.read_text())
+            self.cli("recover-review", "--run", run["id"], ok=False)
+            self.cli("complete", status, ok=False)
+
+    def test_recover_review_rejects_unsafe_states_without_writing(self):
+        r = self.legacy_ready_review()
+        directory = self.root / "runs" / r["id"]
+        task_file = self.root / "tasks/task1.json"
+        run_file = directory / "state.json"
+        task = json.loads(task_file.read_text())
+        run = json.loads(run_file.read_text())
+        cases = [(dict(task, status=status), run) for status in ("backlog", "running", "blocked", "done", "cancelled")]
+        cases += [(task, dict(run, status=status)) for status in
+                  ("launching", "running", "blocked", "launch_failed", "interrupted", "done", "cancelled")]
+        cases += [(dict(task, active_run="another-run"), run),
+                  (task, dict(run, id="another-run")), (task, dict(run, task="missing-task")),
+                  (task, dict(run, worker_pid=os.getpid(), worker_identity=None))]
+        for changed_task, changed_run in cases:
+            with self.subTest(task=changed_task, run=changed_run):
+                task_file.write_text(json.dumps(changed_task))
+                run_file.write_text(json.dumps(changed_run))
+                before = {p: p.read_bytes() for p in self.root.rglob("*.json")}
+                self.cli("recover-review", "--run", r["id"], ok=False)
+                self.assertEqual({p: p.read_bytes() for p in self.root.rglob("*.json")}, before)
+                self.assertFalse((directory / "review-recovery.json").exists())
+        task_file.write_text(json.dumps(task))
+        run_file.write_text(json.dumps(run))
+        report = directory / "result.md"
+        for text in (None, " \n"):
+            if text is None:
+                report.unlink()
+            else:
+                report.write_text(text)
+            self.cli("recover-review", "--run", r["id"], ok=False)
+            self.assertEqual(json.loads(task_file.read_text())["status"], "ready")
+            self.assertFalse((directory / "review-recovery.json").exists())
+
     def test_complete_accepts_and_closes_saved_tab_idempotently(self):
         r = self.review()
         result = self.cli("complete", "task1")

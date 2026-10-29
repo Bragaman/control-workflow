@@ -205,6 +205,7 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
         }
         "task-set" => {
             let mut t = c.task(id)?;
+            let was_review = t["status"] == "review";
             ensure!(
                 !["running", "blocked"].contains(&s(&t, "status")),
                 "Для текущего запуска используйте progress/block/answer/interrupt"
@@ -243,8 +244,23 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
             }
             let p = profile(c, &t)?;
             extend(&mut t, p);
-            t["updated_at"] = json!(now());
-            c.save(&c.path("tasks", id)?, &t)?;
+            if was_review && t["status"] != "review" {
+                let mut r = c.current(&t, s(&t, "active_run"))?;
+                ensure!(
+                    r["status"] == "review" && r["task"] == id,
+                    "Статусы task/run расходятся; сначала сверьте текущий запуск"
+                );
+                r["status"] = json!(if t["status"] == "cancelled" {
+                    "cancelled"
+                } else {
+                    "interrupted"
+                });
+                r["interruption"] = json!(format!("task-set: review -> {}", s(&t, "status")));
+                c.update(&mut r, &mut t)?;
+            } else {
+                t["updated_at"] = json!(now());
+                c.save(&c.path("tasks", id)?, &t)?;
+            }
             Ok(task_response(t, a["compact"] == true))
         }
         "projects" | "tasks" => {
@@ -320,7 +336,7 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
                 Ok(r)
             }
         }
-        "progress" | "block" | "finish" | "recover-start" => worker(c, name, a),
+        "progress" | "block" | "finish" | "recover-start" | "recover-review" => worker(c, name, a),
         "answer" => {
             let mut t = c.task(id)?;
             ensure!(t["status"] == "blocked", "Задача не заблокирована");
@@ -475,6 +491,37 @@ fn worker(c: &Context, name: &str, a: &Value) -> Result<Value> {
     let mut t = c.task(s(&r, "task"))?;
     c.current(&t, run)?;
     let dir = c.run_file(run)?.parent().unwrap().to_path_buf();
+    if name == "recover-review" {
+        ensure!(
+            r["id"] == run && r["task"] == t["id"],
+            "Запуск не соответствует задаче"
+        );
+        ensure!(
+            r["status"] == "review" && ["ready", "review"].contains(&s(&t, "status")),
+            "Восстановление review доступно только для task=ready/review и run=review"
+        );
+        ensure!(!external::launcher_alive(&r), "Подготовитель ещё работает");
+        let result_file = dir.join("result.md");
+        let report = fs::read_to_string(&result_file)?;
+        ensure!(!report.trim().is_empty(), "Сохранённый результат пуст");
+        let recovery_file = dir.join("review-recovery.json");
+        if t["status"] == "ready" {
+            if !recovery_file.exists() {
+                c.save(
+                    &recovery_file,
+                    &json!({
+                        "run":run, "task":t["id"], "previous_task_status":t["status"],
+                        "run_status":r["status"], "result_revision":r["result_revision"],
+                        "result_sha256":review::digest(report.as_bytes()), "recovered_at":now()
+                    }),
+                )?;
+            }
+            t["status"] = json!("review");
+            t["updated_at"] = json!(now());
+            c.save(&c.path("tasks", s(&t, "id"))?, &t)?;
+        }
+        return Ok(json!({"run":run,"task":t["id"],"status":"review","result":result_file}));
+    }
     if name == "recover-start" {
         ensure!(
             ["launch_failed", "interrupted"].contains(&s(&r, "status")),
