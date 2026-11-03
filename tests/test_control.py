@@ -83,6 +83,11 @@ elif a[:2] == ["pane", "get"]:
 elif a[:2] == ["pane", "split"]:
     r = {"pane": {"pane_id": "w7:p3"}}
 elif a[:2] == ["agent", "start"]:
+    count = Path(os.environ["FAKE_LOG"] + ".process-count")
+    startup = int(os.environ.get("FAKE_SHELL_STARTUP", "0"))
+    if os.environ.get("FAKE_START_BUSY") or (startup and (not count.exists() or int(count.read_text()) <= startup)):
+        print(json.dumps({"error": {"code": "agent_pane_busy", "message": "agent target pane w7:p1 is not an available shell"}}), file=sys.stderr)
+        sys.exit(1)
     Path(os.environ["FAKE_LOG"] + ".assignment").write_text(a[-1].split("Прочитай задание ")[1].split(" и выполни")[0])
     if os.environ.get("FAKE_START_GATE"):
         gate = Path(os.environ["FAKE_START_GATE"])
@@ -101,6 +106,16 @@ elif a[:2] == ["agent", "start"]:
         print("{bad json")
         sys.exit(0)
     r = {}
+elif a[:2] == ["pane", "process-info"]:
+    counter = Path(os.environ["FAKE_LOG"] + ".process-count")
+    count = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(count))
+    r = {"process_info": {"pane_id": a[a.index("--pane") + 1], "shell_pid": 123,
+                          "foreground_process_group_id": 123,
+                          "foreground_processes": [{"pid": 123, "name": "zsh"}]}}
+    if count <= int(os.environ.get("FAKE_SHELL_STARTUP", "0")) or os.environ.get("FAKE_SHELL_BUSY"):
+        r["process_info"]["foreground_process_group_id"] = 456
+        r["process_info"]["foreground_processes"] = [{"pid": 456, "name": "sleep"}]
 elif a[:2] == ["pane", "current"]:
     if os.environ.get("FAKE_PROBE_ERROR"):
         print('{"error":{"code":"timeout"}}', file=sys.stderr)
@@ -108,7 +123,11 @@ elif a[:2] == ["pane", "current"]:
     if os.environ.get("FAKE_PANE_MISSING"):
         print(json.dumps({"error": {"code": "pane_not_found"}}), file=sys.stderr)
         sys.exit(1)
-    r = {"pane": {"agent": os.environ.get("FAKE_KIND", "codex") if os.environ.get("FAKE_LIVE") else None}}
+    r = {"pane": {"pane_id": a[a.index("--pane") + 1], "agent": os.environ.get("FAKE_KIND", "codex") if os.environ.get("FAKE_LIVE") else None}}
+    if os.environ.get("FAKE_OMIT_AGENT") and not os.environ.get("FAKE_LIVE"):
+        del r["pane"]["agent"]
+    if os.environ.get("FAKE_CURRENT_BAD"):
+        r = {"pane": {} if os.environ["FAKE_CURRENT_BAD"] == "empty" else {"pane_id": "another-pane"}}
 elif a[:2] == ["pane", "read"]:
     if os.environ.get("FAKE_LATE_ASSIGNMENT"):
         counter = Path(os.environ["FAKE_LOG"] + ".read-count")
@@ -950,6 +969,104 @@ class ControlTests(unittest.TestCase):
                 return run
             time.sleep(0.03)
         self.fail("Подготовитель не завершился: " + str(run))
+
+    def test_busy_shell_with_omitted_agent_is_failed_not_pending(self):
+        self.create()
+        # Herdr 0.9.5 omits agent for an ordinary shell (it does not emit null).
+        self.env.update(FAKE_START_BUSY="1", FAKE_OMIT_AGENT="1")
+        opened = self.cli("open", "task1")[0]
+        run = self.wait_launcher(opened["run"])
+        self.assertEqual(run["status"], "launch_failed")
+        self.assertNotIn("startup_confirmation_pending", run)
+        self.assertIn("agent_pane_busy", run["error"])
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 1)
+        self.assertFalse(any(c[:2] == ["agent", "prompt"] for c in self.calls()))
+
+    def test_shell_startup_waits_before_sending_assignment_once(self):
+        self.create()
+        self.env.update(FAKE_SHELL_STARTUP="3", FAKE_OMIT_AGENT="1")
+        opened = self.cli("open", "task1")[0]
+        run = self.wait_launcher(opened["run"])
+        self.assertEqual(run["status"], "running")
+        calls = self.calls()
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in calls), 1)
+        self.assertGreaterEqual(sum(c[:2] == ["pane", "process-info"] for c in calls), 4)
+        self.assertFalse(any(c[:2] in (["agent", "prompt"], ["pane", "run"], ["pane", "send-keys"]) for c in calls))
+
+    def test_busy_foreground_never_receives_assignment(self):
+        self.create()
+        config = Path(self.env["CONTROL_PLANE_CONFIG"])
+        settings = json.loads(config.read_text())
+        settings["agent_start_timeout_ms"] = 300
+        config.write_text(json.dumps(settings))
+        self.env.update(FAKE_SHELL_BUSY="1", FAKE_OMIT_AGENT="1")
+        opened = self.cli("open", "task1")[0]
+        run = self.wait_launcher(opened["run"])
+        self.assertEqual(run["status"], "launch_failed")
+        self.assertNotIn("agent_start_intent", run)
+        self.assertIn("agent start не отправлен", run["error"])
+        self.assertFalse(any(c[:2] == ["agent", "start"] for c in self.calls()))
+
+    def test_busy_with_unrelated_live_agent_never_resubmits(self):
+        self.create()
+        self.env.update(FAKE_START_BUSY="1", FAKE_LIVE="1")
+        opened = self.cli("open", "task1")[0]
+        run = self.wait_launcher(opened["run"])
+        self.assertEqual(run["status"], "launching")
+        self.assertTrue(run["startup_confirmation_pending"])
+        self.cli("open", "task1", ok=False)
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 1)
+        self.assertFalse(any(c[:2] == ["agent", "prompt"] for c in self.calls()))
+
+    def test_busy_rejection_recovers_absent_shell_including_legacy_pending(self):
+        self.create()
+        self.env.update(FAKE_START_BUSY="1", FAKE_OMIT_AGENT="1")
+        opened = self.cli("open", "task1")[0]
+        run = self.wait_launcher(opened["run"])
+        # Reproduce the state left by the old launcher, not only the new failure.
+        state_file = self.root / "runs" / run["id"] / "state.json"
+        run.update(status="launching", startup_confirmation_pending=True)
+        state_file.write_text(json.dumps(run))
+        del self.env["FAKE_START_BUSY"]
+        recovered = self.cli("open", "task1")[0]
+        self.assertNotEqual(recovered["run"], run["id"])
+        fresh = self.wait_launcher(recovered["run"])
+        self.assertEqual(fresh["status"], "running")
+        self.assertEqual(fresh["previous_run"], run["id"])
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 2)
+        self.assertFalse(any(c[:2] == ["agent", "prompt"] for c in self.calls()))
+
+    def test_busy_rejection_with_late_manual_agent_reuses_run(self):
+        self.create()
+        self.env.update(FAKE_START_BUSY="1", FAKE_OMIT_AGENT="1")
+        opened = self.cli("open", "task1")[0]
+        run = self.wait_launcher(opened["run"])
+        self.env.update(FAKE_LIVE="1", FAKE_ASSIGNMENT=str(self.root / "runs" / run["id"] / "assignment.md"))
+        recovered = self.cli("open", "task1")[0]
+        self.assertEqual(recovered["run"], run["id"])
+        self.assertEqual(recovered["action"], "recovered")
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 1)
+        self.assertFalse(any(c[:2] == ["agent", "prompt"] for c in self.calls()))
+
+    def test_missing_agent_does_not_make_malformed_pane_safe_to_retry(self):
+        self.create()
+        self.env.update(FAKE_START_BUSY="1", FAKE_CURRENT_BAD="empty")
+        opened = self.cli("open", "task1")[0]
+        run = self.wait_launcher(opened["run"])
+        self.assertTrue(run["startup_confirmation_pending"])
+        for response in ("empty", "wrong-id"):
+            self.env["FAKE_CURRENT_BAD"] = response
+            self.cli("open", "task1", ok=False)
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 1)
+
+    def test_unknown_start_with_absent_shell_cannot_resubmit(self):
+        self.create()
+        self.env.update(FAKE_START_BAD_JSON="1", FAKE_OMIT_AGENT="1")
+        opened = self.cli("open", "task1")[0]
+        run = self.wait_launcher(opened["run"])
+        self.assertEqual(run["status"], "launch_failed")
+        self.cli("open", "task1", ok=False)
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 1)
 
     def test_uncertain_start_is_reconciled_without_duplicate_or_failure(self):
         for reason in ("unrelated-output", "transport-error", "malformed-start-response"):

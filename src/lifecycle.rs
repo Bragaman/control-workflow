@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub fn workspace_binding(
@@ -82,6 +82,102 @@ pub fn workspace_binding(
     p["workspace_namespace"] = ns.clone();
     Ok(result)
 }
+// Herdr omits optional agent on ordinary shells. Check pane identity before
+// interpreting either an omitted agent or an explicit null as absence.
+fn current_pane(c: &Context, r: &Value) -> Result<Option<Value>> {
+    let v = match c.herdr(
+        &["pane", "current", "--pane", s(r, "pane")],
+        r["herdr_session"].as_str(),
+    ) {
+        Ok(v) => v,
+        Err(e) if error_code(&e) == "pane_not_found" => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let pane = &v["pane"];
+    ensure!(
+        pane.is_object()
+            && pane["pane_id"] == r["pane"]
+            && (pane["agent"].is_null() || pane["agent"].as_str().is_some_and(|v| !v.is_empty())),
+        "Herdr не подтвердил состояние исполнителя"
+    );
+    Ok(Some(pane.clone()))
+}
+fn start_rejected(r: &Value) -> bool {
+    ["startup_error", "error"].iter().any(|field| {
+        serde_json::from_str::<Value>(s(r, field))
+            .is_ok_and(|error| error["error"]["code"] == "agent_pane_busy")
+    })
+}
+
+// Wait only on our newly created pane. Never send shell probes or input.
+fn wait_new_shell(c: &Context, r: &Value) -> Result<()> {
+    let deadline = Instant::now()
+        + Duration::from_millis(
+            c.settings["agent_start_timeout_ms"]
+                .as_u64()
+                .unwrap()
+                .min(10_000),
+        );
+    let mut shell_pid = None;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        ensure!(
+            !remaining.is_zero(),
+            "Не дождались готовности нового shell; agent start не отправлен"
+        );
+        let v = c.herdr_timeout(
+            &["pane", "process-info", "--pane", s(r, "pane")],
+            r["herdr_session"].as_str(),
+            remaining,
+        )?;
+        let info = &v["process_info"];
+        ensure!(
+            info["pane_id"] == r["pane"],
+            "Herdr не подтвердил процессы нового shell"
+        );
+        if let Some(pid) = info["shell_pid"].as_u64().filter(|pid| *pid > 0) {
+            ensure!(
+                shell_pid.is_none_or(|old| old == pid),
+                "Shell нового терминала сменился"
+            );
+            shell_pid = Some(pid);
+            if info["foreground_process_group_id"].as_u64() == Some(pid)
+                && info["foreground_processes"]
+                    .as_array()
+                    .is_some_and(|processes| {
+                        processes.len() == 1
+                            && processes[0]["pid"].as_u64() == Some(pid)
+                            && matches!(
+                                processes[0]["name"].as_str(),
+                                Some(
+                                    "sh" | "bash"
+                                        | "zsh"
+                                        | "fish"
+                                        | "dash"
+                                        | "ksh"
+                                        | "mksh"
+                                        | "csh"
+                                        | "tcsh"
+                                        | "elvish"
+                                        | "xonsh"
+                                        | "nu"
+                                        | "pwsh"
+                                        | "powershell"
+                                )
+                            )
+                    })
+            {
+                return Ok(());
+            }
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "Не дождались готовности нового shell; agent start не отправлен"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 pub fn require_absent(c: &Context, r: &Value) -> Result<()> {
     ensure!(
         !launcher_alive(r),
@@ -102,26 +198,17 @@ pub fn require_absent(c: &Context, r: &Value) -> Result<()> {
     if r["pane"].is_null() {
         return Ok(());
     }
-    let v = match c.herdr(
-        &["pane", "current", "--pane", s(r, "pane")],
-        r["herdr_session"].as_str(),
-    ) {
-        Ok(v) => v,
-        Err(e) if error_code(&e) == "pane_not_found" => return Ok(()),
-        Err(e) => return Err(e),
+    let Some(pane) = current_pane(c, r)? else {
+        return Ok(());
     };
     ensure!(
-        v["pane"].get("agent").is_some(),
-        "Herdr не подтвердил состояние прежнего исполнителя"
-    );
-    ensure!(
-        v["pane"]["agent"].is_null(),
+        pane["agent"].is_null(),
         "Прежний исполнитель ещё работает; продолжите {} в {}",
         s(r, "id"),
         s(r, "pane")
     );
     ensure!(
-        r["agent_start_intent"] != true || r["agent_start_completed"] == true,
+        r["agent_start_intent"] != true || r["agent_start_completed"] == true || start_rejected(r),
         "Результат agent start неизвестен; сверьте {} через recover-start",
         s(r, "id")
     );
@@ -146,22 +233,13 @@ fn old_workspace_idle(c: &Context, p: &Value, ns: &Value, current: Option<&str>)
 }
 pub fn agent_state(c: &Context, r: &Value) -> Result<&'static str> {
     c.check_namespace(r)?;
-    let v = match c.herdr(
-        &["pane", "current", "--pane", s(r, "pane")],
-        r["herdr_session"].as_str(),
-    ) {
-        Ok(v) => v,
-        Err(e) if error_code(&e) == "pane_not_found" => return Ok("absent"),
-        Err(e) => return Err(e),
+    let Some(pane) = current_pane(c, r)? else {
+        return Ok("absent");
     };
-    ensure!(
-        v["pane"].get("agent").is_some(),
-        "Herdr не подтвердил состояние исполнителя"
-    );
-    if v["pane"]["agent"].is_null() {
+    if pane["agent"].is_null() {
         return Ok("absent");
     }
-    if v["pane"]["agent"] != external::agent_kind(c, r) {
+    if pane["agent"] != external::agent_kind(c, r) {
         return Ok("unconfirmed");
     }
     let text = c.herdr_text(
@@ -407,34 +485,22 @@ fn open_one(c: &Context, id: &str, requested: Option<&str>) -> Result<Value> {
         }
         if !r["pane"].is_null() {
             c.check_namespace(&r)?;
-            match c.herdr(
-                &["pane", "current", "--pane", s(&r, "pane")],
-                r["herdr_session"].as_str(),
-            ) {
-                Ok(v) => {
-                    ensure!(
-                        v["pane"].get("agent").is_some(),
-                        "Herdr не подтвердил состояние прежнего исполнителя"
-                    );
-                    if !v["pane"]["agent"].is_null() {
-                        ensure!(
-                            v["pane"]["agent"] == external::agent_kind(c, &r)
-                                && agent_state(c, &r)? == "confirmed",
-                            "Терминал не подтверждает исполнителя с заданием этого запуска"
-                        );
-                        crate::policy::check_reuse(selected.as_ref(), &r)?;
-                        let mut t = t;
-                        let mut action = "existing";
-                        if ["launch_failed", "interrupted", "launching"].contains(&s(&r, "status"))
-                        {
-                            mark_recovered(c, &mut r, &mut t)?;
-                            action = "recovered";
-                        }
-                        return summary(c, &t, Some(&r), action);
-                    }
+            if let Some(pane) = current_pane(c, &r)?
+                && !pane["agent"].is_null()
+            {
+                ensure!(
+                    pane["agent"] == external::agent_kind(c, &r)
+                        && agent_state(c, &r)? == "confirmed",
+                    "Терминал не подтверждает исполнителя с заданием этого запуска"
+                );
+                crate::policy::check_reuse(selected.as_ref(), &r)?;
+                let mut t = t;
+                let mut action = "existing";
+                if ["launch_failed", "interrupted", "launching"].contains(&s(&r, "status")) {
+                    mark_recovered(c, &mut r, &mut t)?;
+                    action = "recovered";
                 }
-                Err(e) if error_code(&e) == "pane_not_found" => {}
-                Err(e) => return Err(e),
+                return summary(c, &t, Some(&r), action);
             }
         }
     }
@@ -677,6 +743,7 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
     }
     let assignment = c.run_file(id)?.with_file_name("assignment.md");
     store::atomic(&assignment, assignment_text(c, &r, &t)?.as_bytes())?;
+    wait_new_shell(c, &r)?;
     let argv = external::start_args(c, &mut r, &t, &cwd, &assignment);
     {
         let _lock = c.lock()?;
@@ -724,6 +791,7 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
             || !s(&fresh, "progress").is_empty();
         if state != "confirmed" && !reported {
             if state == "absent" {
+                c.update(&mut fresh, &mut t)?;
                 return Err(error);
             }
             fresh["startup_confirmation_pending"] = json!(true);
