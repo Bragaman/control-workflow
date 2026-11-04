@@ -1628,5 +1628,46 @@
         "integer": false
       }
     ]
+  },
+  {
+    "name": "recover-layout",
+    "options": [
+      {
+        "name": "run",
+        "flags": [
+          "--run"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "workspace",
+        "flags": [
+          "--workspace"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "pane",
+        "flags": [
+          "--pane"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
   }
 ]

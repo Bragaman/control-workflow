@@ -195,6 +195,11 @@ pub fn require_absent(c: &Context, r: &Value) -> Result<()> {
         "Неизвестен результат создания layout: {}",
         s(r, "id")
     );
+    ensure!(
+        r["worktree_intent"].is_null(),
+        "Неизвестен результат создания Git worktree: {}; сначала сверьте Git и состояние запуска",
+        s(r, "id")
+    );
     if r["pane"].is_null() {
         return Ok(());
     }
@@ -213,6 +218,125 @@ pub fn require_absent(c: &Context, r: &Value) -> Result<()> {
         s(r, "id")
     );
     Ok(())
+}
+/// Explicit operator confirmation after an ambiguous layout mutation.
+pub fn recover_layout(c: &Context, r: &mut Value, t: &mut Value, a: &Value) -> Result<Value> {
+    ensure!(!launcher_alive(r), "Подготовитель ещё работает");
+    ensure!(
+        ["launch_failed", "launching", "interrupted"].contains(&s(r, "status"))
+            && r["agent_start_intent"].is_null(),
+        "Восстановление доступно до старта агента"
+    );
+    c.check_namespace(r)?;
+    let ns = c.namespace(None)?;
+    ensure!(ns == r["herdr_namespace"], "Выбран другой namespace");
+    let intent = r["layout_intent"].clone();
+    let kind = s(&intent, "kind");
+    ensure!(
+        ["repository_workspace", "worktree_open"].contains(&kind),
+        "Нет поддерживаемого намерения layout"
+    );
+    for wt in r["worktrees"]
+        .as_array()
+        .ok_or_else(|| anyhow!("Нет worktrees"))?
+    {
+        git::validate_worktree(wt)?;
+    }
+    let workspace = s(a, "workspace");
+    let listed = c.herdr(
+        &["worktree", "list", "--workspace", workspace],
+        r["herdr_session"].as_str(),
+    )?;
+    ensure!(
+        listed["source"]["repo_root"] == intent["repository"],
+        "Workspace другого репозитория"
+    );
+    let mut p = c.read(&c.path("projects", s(t, "project"))?)?;
+    ensure!(
+        p["layout_pending"].is_null() || p["layout_pending"] == r["id"],
+        "Проект не ожидает layout этого запуска"
+    );
+    if kind == "repository_workspace" {
+        ensure!(
+            listed["worktrees"].as_array().is_some_and(|items| items
+                .iter()
+                .any(|w| w["path"] == intent["repository"] && w["open_workspace_id"] == workspace)),
+            "Нужен основной workspace репозитория"
+        );
+        if p["repository_workspaces"].is_null() {
+            p["repository_workspaces"] = json!([]);
+        }
+        let bindings = p["repository_workspaces"]
+            .as_array_mut()
+            .ok_or_else(|| anyhow!("Некорректные привязки"))?;
+        // A replacement is allowed only after Herdr positively confirms the
+        // old parent is gone. Transport errors and live parents stay intact.
+        for binding in bindings.iter().filter(|v| {
+            v["repository"] == intent["repository"]
+                && v["namespace"] == ns
+                && v["workspace"] != workspace
+        }) {
+            match c.herdr(
+                &["workspace", "get", s(binding, "workspace")],
+                r["herdr_session"].as_str(),
+            ) {
+                Err(e) if error_code(&e) == "workspace_not_found" => {}
+                Err(e) => return Err(e),
+                Ok(_) => bail!("Уже есть живая привязка родителя"),
+            }
+        }
+        bindings.retain(|v| {
+            !(v["repository"] == intent["repository"]
+                && v["namespace"] == ns
+                && v["workspace"] != workspace)
+        });
+        if !bindings
+            .iter()
+            .any(|v| v["repository"] == intent["repository"] && v["namespace"] == ns)
+        {
+            bindings.push(
+                json!({"repository":intent["repository"],"namespace":ns,"workspace":workspace}),
+            );
+        }
+        r.as_object_mut().unwrap().remove("layout_intent");
+    } else {
+        ensure!(
+            r["pane"].is_null() || (r["workspace"] == workspace && r["pane"] == a["pane"]),
+            "Подтвердите сохранённые workspace и pane"
+        );
+        ensure!(
+            listed["worktrees"].as_array().is_some_and(|items| items
+                .iter()
+                .any(|w| w["path"] == intent["path"] && w["open_workspace_id"] == workspace)),
+            "Workspace другого checkout"
+        );
+        let panes = c.herdr(
+            &["pane", "list", "--workspace", workspace],
+            r["herdr_session"].as_str(),
+        )?;
+        let panes = panes["panes"]
+            .as_array()
+            .ok_or_else(|| anyhow!("Некорректные панели"))?;
+        ensure!(
+            panes.len() == 1 && panes[0]["pane_id"] == a["pane"] && panes[0]["agent"].is_null(),
+            "Подтвердите единственную свободную панель через --pane"
+        );
+        ensure!(
+            r["tab"].is_null() || r["tab"] == panes[0]["tab_id"],
+            "Сохранённый tab изменился"
+        );
+        r["workspace"] = json!(workspace);
+        r["pane"] = panes[0]["pane_id"].clone();
+        r["tab"] = panes[0]["tab_id"].clone();
+        ensure!(!s(r, "tab").is_empty(), "Herdr не подтвердил tab");
+        r["repository_workspace"] = json!({"repository":intent["repository"],"parent":intent["parent_workspace"],"path":intent["path"],"namespace":ns});
+    }
+    r["layout_recovery"] =
+        json!({"at":now(),"workspace":workspace,"pane":a["pane"],"intent":intent});
+    p.as_object_mut().unwrap().remove("layout_pending");
+    c.save(&c.path("projects", s(t, "project"))?, &p)?;
+    c.update(r, t)?;
+    Ok(json!({"run":r["id"],"status":r["status"],"next":"open выбранной задачи продолжит запуск"}))
 }
 fn old_workspace_idle(c: &Context, p: &Value, ns: &Value, current: Option<&str>) -> Result<()> {
     for r in c.runs()? {
@@ -303,16 +427,89 @@ pub fn start(
     }
     let mut p = c.read(&c.path("projects", s(&t, "project"))?)?;
     let ns = c.namespace(None)?;
-    let mut previous = if let Some(id) = t["active_run"].as_str() {
-        let r = c.read(&c.run_file(id)?)?;
+    let mut previous = if let Some(id) = t["active_run"].as_str().map(str::to_owned) {
+        let mut r = c.read(&c.run_file(&id)?)?;
+        if !r["worktree_intent"].is_null() {
+            ensure!(!launcher_alive(&r), "Подготовитель ещё работает: {id}");
+            c.check_namespace(&r)?;
+            let intended = r["worktree_intent"].clone();
+            let path = Path::new(s(&intended, "path"));
+            let repo = Path::new(s(&intended, "repository"));
+            if path.exists() {
+                git::validate_worktree(&intended)?;
+                r["worktrees"]
+                    .as_array_mut()
+                    .ok_or_else(|| anyhow!("Нет worktrees"))?
+                    .push(intended);
+            } else {
+                let branch = format!("refs/heads/{}", s(&intended, "branch"));
+                ensure!(
+                    git::git(repo, &["rev-parse", "--verify", &branch], true)?.is_empty(),
+                    "Ветка существует без ожидаемого worktree; нужна ручная сверка"
+                );
+                let registered = git::git(repo, &["worktree", "list", "--porcelain"], false)?;
+                ensure!(
+                    !registered
+                        .lines()
+                        .any(|line| line == format!("worktree {}", path.display())),
+                    "Git зарегистрировал отсутствующий worktree; нужна ручная сверка"
+                );
+            }
+            r.as_object_mut().unwrap().remove("worktree_intent");
+            c.update(&mut r, &mut t)?;
+        }
+        if r["pane"].is_null() && r["layout_intent"]["kind"] == "worktree_open" {
+            ensure!(!launcher_alive(&r), "Подготовитель ещё работает: {id}");
+            c.check_namespace(&r)?;
+            ensure!(
+                p["layout_pending"].is_null() || p["layout_pending"] == id,
+                "Другой запуск ожидает сверки layout"
+            );
+            let intent = &r["layout_intent"];
+            let listed = c.herdr(
+                &[
+                    "worktree",
+                    "list",
+                    "--workspace",
+                    s(intent, "parent_workspace"),
+                ],
+                r["herdr_session"].as_str(),
+            )?;
+            ensure!(
+                listed["source"]["repo_root"] == intent["repository"],
+                "Родительский workspace относится к другому репозиторию"
+            );
+            let matches = listed["worktrees"]
+                .as_array()
+                .ok_or_else(|| anyhow!("Некорректный список worktree"))?
+                .iter()
+                .filter(|w| w["path"] == intent["path"])
+                .collect::<Vec<_>>();
+            ensure!(
+                matches.len() == 1 && matches[0]["open_workspace_id"].is_null(),
+                "Результат worktree open не подтверждён как отсутствующий; нужна ручная сверка"
+            );
+            p.as_object_mut().unwrap().remove("layout_pending");
+            c.save(&c.path("projects", s(&p, "id"))?, &p)?;
+            r.as_object_mut().unwrap().remove("layout_intent");
+            c.update(&mut r, &mut t)?;
+        }
         require_absent(c, &r)?;
         Some(r)
     } else {
         None
     };
-    let workspace = workspace_binding(c, &mut p, &ns, repair)?;
-    if !p["workspace"].is_null() && workspace.is_none() {
-        old_workspace_idle(c, &p, &ns, None)?;
+    if t["code"] == true {
+        ensure!(
+            p["layout_pending"].is_null(),
+            "Неизвестен результат создания layout; сначала сверьте запуск {}",
+            s(&p, "layout_pending")
+        );
+    } else {
+        let workspace = workspace_binding(c, &mut p, &ns, repair)?;
+        if !p["workspace"].is_null() && workspace.is_none() {
+            old_workspace_idle(c, &p, &ns, None)?;
+        }
     }
     c.save(&c.path("projects", s(&p, "id"))?, &p)?;
     let repos = if t["repositories"].is_null() {
@@ -619,6 +816,15 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
         .join(s(&t, "id"))
         .join(format!("{index}-{id}"));
         let branch = format!("control/{}/{id}", s(&t, "id"));
+        // Record the intended checkout before invoking Git: a failed or timed-out
+        // command may still have created it and must not be repeated blindly.
+        {
+            let _lock = c.lock()?;
+            t = c.task(s(&r, "task"))?;
+            r = c.current(&t, id)?;
+            r["worktree_intent"] = json!({"repository":repo,"path":wt,"branch":branch,"main_branch":git::main_branch(Path::new(repo),None)?});
+            c.update(&mut r, &mut t)?;
+        }
         fs::create_dir_all(wt.parent().unwrap())?;
         git::git(
             Path::new(repo),
@@ -641,6 +847,7 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
             s(&fresh, "status")
         );
         fresh["worktrees"] = r["worktrees"].clone();
+        fresh.as_object_mut().unwrap().remove("worktree_intent");
         r = fresh;
         t = c.task(s(&r, "task"))?;
         c.update(&mut r, &mut t)?;
@@ -677,63 +884,226 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
         );
         let mut p = c.read(&c.path("projects", s(&t, "project"))?)?;
         let ns = r["herdr_namespace"].clone();
-        let workspace = workspace_binding(c, &mut p, &ns, false)?;
-        if !p["workspace"].is_null() && workspace.is_none() {
-            old_workspace_idle(c, &p, &ns, Some(id))?;
-        }
-        r["layout_intent"] = json!({"kind":if workspace.is_some(){"tab"}else{"workspace"},"old_workspace":p["workspace"]});
-        p["layout_pending"] = json!(id);
-        c.save(&c.path("projects", s(&p, "id"))?, &p)?;
-        c.update(&mut r, &mut t)?;
-        layout = if let Some(workspace) = workspace {
-            r["workspace"] = workspace["workspace_id"].clone();
+        let workspace = if r["worktrees"].as_array().unwrap().is_empty() {
+            workspace_binding(c, &mut p, &ns, false)?
+        } else {
+            ensure!(
+                p["layout_pending"].is_null(),
+                "Неизвестен результат создания layout; сначала сверьте запуск {}",
+                s(&p, "layout_pending")
+            );
+            None
+        };
+        if !r["worktrees"].as_array().unwrap().is_empty() {
+            // Code tasks use a repository workspace as the parent, independent
+            // of the project's ordinary workspace used by no-code tasks.
+            let first = r["worktrees"][0].clone();
+            let repo = s(&first, "repository");
+            let entry = p["repository_workspaces"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|v| v["repository"] == repo && v["namespace"] == ns)
+                .cloned();
+            r["layout_intent"] =
+                json!({"kind":"repository_workspace","repository":repo,"path":first["path"]});
+            p["layout_pending"] = json!(id);
+            c.save(&c.path("projects", s(&p, "id"))?, &p)?;
             c.update(&mut r, &mut t)?;
-            c.herdr(
+            let parent = if let Some(entry) = entry {
+                let parent = s(&entry, "workspace").to_owned();
+                let listed = c.herdr(
+                    &["worktree", "list", "--workspace", &parent],
+                    r["herdr_session"].as_str(),
+                )?;
+                ensure!(
+                    listed["source"]["repo_root"] == repo,
+                    "Родительский workspace относится к другому репозиторию"
+                );
+                parent
+            } else {
+                let created = c.herdr(
+                    &[
+                        "workspace",
+                        "create",
+                        "--cwd",
+                        repo,
+                        "--label",
+                        s(&p, "name"),
+                        "--no-focus",
+                    ],
+                    r["herdr_session"].as_str(),
+                )?;
+                let parent = s(&created["workspace"], "workspace_id").to_owned();
+                ensure!(
+                    !parent.is_empty(),
+                    "Herdr не подтвердил родительский workspace"
+                );
+                if p["repository_workspaces"].is_null() {
+                    p["repository_workspaces"] = json!([]);
+                }
+                p["repository_workspaces"]
+                    .as_array_mut()
+                    .ok_or_else(|| anyhow!("Некорректные привязки репозиториев"))?
+                    .push(json!({"repository":repo,"namespace":ns,"workspace":parent}));
+                c.save(&c.path("projects", s(&p, "id"))?, &p)?;
+                parent
+            };
+            r["layout_intent"] = json!({"kind":"worktree_open","repository":repo,"path":first["path"],"parent_workspace":parent});
+            c.update(&mut r, &mut t)?;
+            let listed = c.herdr(
+                &["worktree", "list", "--workspace", &parent],
+                r["herdr_session"].as_str(),
+            )?;
+            ensure!(
+                listed["source"]["repo_root"] == repo,
+                "Родительский workspace относится к другому репозиторию"
+            );
+            let matches = listed["worktrees"]
+                .as_array()
+                .ok_or_else(|| anyhow!("Некорректный список worktree"))?
+                .iter()
+                .filter(|w| w["path"] == first["path"])
+                .collect::<Vec<_>>();
+            ensure!(
+                matches.len() == 1,
+                "Git worktree не найден однозначно в Herdr"
+            );
+            if !matches[0]["open_workspace_id"].is_null() {
+                let previous = r["previous_run"]
+                    .as_str()
+                    .map(|id| c.read(&c.run_file(id)?))
+                    .transpose()?;
+                ensure!(
+                    previous
+                        .as_ref()
+                        .is_some_and(|prev| prev["workspace"] == matches[0]["open_workspace_id"]
+                            && prev["herdr_namespace"] == ns),
+                    "Worktree уже открыт в неподтверждённом workspace"
+                );
+            }
+            let opened = c.herdr(
                 &[
-                    "tab",
-                    "create",
+                    "worktree",
+                    "open",
                     "--workspace",
-                    s(&r, "workspace"),
-                    "--cwd",
-                    &cwd.to_string_lossy(),
+                    &parent,
+                    "--path",
+                    s(&first, "path"),
                     "--label",
                     s(&t, "id"),
                     "--no-focus",
                 ],
                 r["herdr_session"].as_str(),
-            )?
-        } else {
-            let layout = c.herdr(
-                &[
-                    "workspace",
-                    "create",
-                    "--cwd",
-                    &cwd.to_string_lossy(),
-                    "--label",
-                    s(&p, "name"),
-                    "--no-focus",
-                ],
-                r["herdr_session"].as_str(),
             )?;
-            r["workspace"] = layout["workspace"]["workspace_id"].clone();
-            if !p["workspace"].is_null() {
-                r["workspace_recovery"] = json!({"old":p["workspace"],"new":r["workspace"],"reason":"workspace_not_found"});
+            ensure!(
+                opened["worktree"]["path"] == first["path"]
+                    && opened["workspace"]["worktree"]["checkout_path"] == first["path"],
+                "Herdr вернул другой worktree"
+            );
+            if opened["already_open"] == true {
+                let previous = r["previous_run"]
+                    .as_str()
+                    .map(|id| c.read(&c.run_file(id)?))
+                    .transpose()?;
+                ensure!(
+                    previous.as_ref().is_some_and(|prev| prev["workspace"]
+                        == opened["workspace"]["workspace_id"]
+                        && prev["pane"] == opened["root_pane"]["pane_id"]
+                        && prev["herdr_namespace"] == ns),
+                    "Открытый workspace не подтверждён прежним запуском"
+                );
+                let panes = c.herdr(
+                    &[
+                        "pane",
+                        "list",
+                        "--workspace",
+                        s(&opened["workspace"], "workspace_id"),
+                    ],
+                    r["herdr_session"].as_str(),
+                )?;
+                ensure!(
+                    panes["panes"]
+                        .as_array()
+                        .is_some_and(|panes| panes.len() == 1
+                            && panes[0]["pane_id"] == opened["root_pane"]["pane_id"]
+                            && panes[0]["agent"].is_null()),
+                    "В существующем workspace есть другие панели или агент; нужна ручная сверка"
+                );
             }
-            layout
-        };
-        r["tab"] = layout["tab"]["tab_id"].clone();
-        r["pane"] = layout["root_pane"]["pane_id"].clone();
-        ensure!(
-            ["workspace", "tab", "pane"]
-                .iter()
-                .all(|k| !s(&r, k).is_empty()),
-            "Herdr не подтвердил созданный layout"
-        );
-        p["workspace"] = r["workspace"].clone();
-        p["workspace_namespace"] = ns;
-        c.update(&mut r, &mut t)?;
-        p.as_object_mut().unwrap().remove("layout_pending");
-        c.save(&c.path("projects", s(&p, "id"))?, &p)?;
+            r["workspace"] = opened["workspace"]["workspace_id"].clone();
+            r["tab"] = opened["tab"]["tab_id"].clone();
+            r["pane"] = opened["root_pane"]["pane_id"].clone();
+            ensure!(
+                ["workspace", "tab", "pane"]
+                    .iter()
+                    .all(|k| !s(&r, k).is_empty()),
+                "Herdr не подтвердил layout worktree"
+            );
+            r["repository_workspace"] =
+                json!({"repository":repo,"parent":parent,"path":first["path"],"namespace":ns});
+            c.update(&mut r, &mut t)?;
+            p.as_object_mut().unwrap().remove("layout_pending");
+            c.save(&c.path("projects", s(&p, "id"))?, &p)?;
+            layout = opened;
+        } else {
+            if !p["workspace"].is_null() && workspace.is_none() {
+                old_workspace_idle(c, &p, &ns, Some(id))?;
+            }
+            r["layout_intent"] = json!({"kind":if workspace.is_some(){"tab"}else{"workspace"},"old_workspace":p["workspace"]});
+            p["layout_pending"] = json!(id);
+            c.save(&c.path("projects", s(&p, "id"))?, &p)?;
+            c.update(&mut r, &mut t)?;
+            layout = if let Some(workspace) = workspace {
+                r["workspace"] = workspace["workspace_id"].clone();
+                c.update(&mut r, &mut t)?;
+                c.herdr(
+                    &[
+                        "tab",
+                        "create",
+                        "--workspace",
+                        s(&r, "workspace"),
+                        "--cwd",
+                        &cwd.to_string_lossy(),
+                        "--label",
+                        s(&t, "id"),
+                        "--no-focus",
+                    ],
+                    r["herdr_session"].as_str(),
+                )?
+            } else {
+                let layout = c.herdr(
+                    &[
+                        "workspace",
+                        "create",
+                        "--cwd",
+                        &cwd.to_string_lossy(),
+                        "--label",
+                        s(&p, "name"),
+                        "--no-focus",
+                    ],
+                    r["herdr_session"].as_str(),
+                )?;
+                r["workspace"] = layout["workspace"]["workspace_id"].clone();
+                if !p["workspace"].is_null() {
+                    r["workspace_recovery"] = json!({"old":p["workspace"],"new":r["workspace"],"reason":"workspace_not_found"});
+                }
+                layout
+            };
+            r["tab"] = layout["tab"]["tab_id"].clone();
+            r["pane"] = layout["root_pane"]["pane_id"].clone();
+            ensure!(
+                ["workspace", "tab", "pane"]
+                    .iter()
+                    .all(|k| !s(&r, k).is_empty()),
+                "Herdr не подтвердил созданный layout"
+            );
+            p["workspace"] = r["workspace"].clone();
+            p["workspace_namespace"] = ns;
+            c.update(&mut r, &mut t)?;
+            p.as_object_mut().unwrap().remove("layout_pending");
+            c.save(&c.path("projects", s(&p, "id"))?, &p)?;
+        }
     }
     if layout.get("workspace").is_some() {
         c.herdr(
@@ -1141,6 +1511,17 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
         if !r["tab"].is_null() {
             tab = saved_tab(c, r)?;
             if let Some(tab) = &tab {
+                if !r["repository_workspace"].is_null() {
+                    let live = c.herdr(
+                        &["workspace", "get", s(r, "workspace")],
+                        r["herdr_session"].as_str(),
+                    )?;
+                    ensure!(
+                        live["workspace"]["worktree"]["checkout_path"]
+                            == r["repository_workspace"]["path"],
+                        "Workspace больше не относится к worktree запуска"
+                    );
+                }
                 ensure!(
                     tab["workspace_id"] == r["workspace"],
                     "Таб не принадлежит сохранённому workspace"
@@ -1155,6 +1536,17 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
                     .iter()
                     .filter(|p| p["tab_id"] == r["tab"])
                     .collect::<Vec<_>>();
+                if !r["repository_workspace"].is_null()
+                    && status == "done"
+                    && r["git_mode"] == "branch"
+                {
+                    ensure!(
+                        panes["panes"].as_array().is_some_and(|items| items
+                            .iter()
+                            .all(|p| p["tab_id"] == r["tab"] && p["pane_id"] == r["pane"])),
+                        "В workspace worktree есть другие панели; Git cleanup остановлен"
+                    );
+                }
                 ensure!(
                     members.iter().any(|p| p["pane_id"] == r["pane"]),
                     "Сохранённая панель исполнителя отсутствует в табе; проверьте его вручную"

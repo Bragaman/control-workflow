@@ -12,7 +12,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("CONTROL_WORKFLOW_BIN", ROOT / "target/debug/control-workflow")).resolve()
 FAKE_HERDR = '''#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, subprocess, sys, time
 from pathlib import Path
 a = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as f:
@@ -33,9 +33,28 @@ if a[:2] == ["workspace", "create"]:
         Path(os.environ["FAKE_LOG"] + ".created").touch()
         print(json.dumps({"error": {"code": "timeout"}}), file=sys.stderr)
         sys.exit(1)
+    Path(os.environ["FAKE_LOG"] + ".repository").write_text(a[a.index("--cwd") + 1])
     r = {"workspace": {"workspace_id": "w7"}, "tab": {"tab_id": "w7:t1"}, "root_pane": {"pane_id": "w7:p1"}}
 elif a[:2] == ["workspace", "list"]:
     r = {"workspaces": []}
+elif a[:2] == ["worktree", "open"]:
+    if os.environ.get("FAKE_WORKTREE_FAIL"):
+        Path(os.environ["FAKE_LOG"] + ".worktree").write_text(a[a.index("--path") + 1])
+        print(json.dumps({"error": {"code": "timeout"}}), file=sys.stderr)
+        sys.exit(1)
+    path = a[a.index("--path") + 1]
+    r = {"already_open": False, "worktree": {"path": path},
+         "workspace": {"workspace_id": "w7", "worktree": {"checkout_path": path}},
+         "tab": {"tab_id": "w7:t1"}, "root_pane": {"pane_id": "w7:p1"}}
+elif a[:2] == ["worktree", "list"]:
+    repo = Path(os.environ["FAKE_LOG"] + ".repository").read_text()
+    worktrees = []
+    if os.environ.get("FAKE_NO_LAYOUT"):
+        worktrees.append({"path": Path(os.environ["FAKE_LOG"] + ".worktree").read_text(), "open_workspace_id": None})
+    elif not Path(os.environ["FAKE_LOG"] + ".worktree").exists():
+        listing = subprocess.check_output(["git", "-C", repo, "worktree", "list", "--porcelain"], text=True)
+        worktrees.extend({"path": line[9:], "open_workspace_id": None} for line in listing.splitlines() if line.startswith("worktree "))
+    r = {"source": {"repo_root": repo}, "worktrees": worktrees}
 elif a[:2] == ["workspace", "get"]:
     if os.environ.get("FAKE_GET_ERROR"):
         print(json.dumps({"error": {"code": os.environ["FAKE_GET_ERROR"]}}), file=sys.stderr)
@@ -53,6 +72,13 @@ elif a[:2] == ["workspace", "get"]:
         print(json.dumps({"error": {"code": "workspace_not_found"}}), file=sys.stderr)
         sys.exit(1)
     r = {"workspace": {"workspace_id": a[2]}}
+    assignment = Path(os.environ["FAKE_LOG"] + ".assignment")
+    if assignment.exists():
+        state = json.loads(Path(assignment.read_text()).with_name('state.json').read_text())
+        if state.get('repository_workspace'):
+            r['workspace']['worktree'] = {'checkout_path': state['repository_workspace']['path']}
+    if os.environ.get('FAKE_WORKSPACE_PATH'):
+        r['workspace']['worktree'] = {'checkout_path': os.environ['FAKE_WORKSPACE_PATH']}
 elif a[:2] == ["tab", "create"]:
     if os.environ.get("FAKE_TAB_FAIL"):
         Path(os.environ["FAKE_LOG"] + ".created").touch()
@@ -1232,8 +1258,14 @@ class ControlTests(unittest.TestCase):
             self.assertEqual(agent[agent.index("--sandbox") + 1], "workspace-write")
         if self.env.get("FAKE_KIND") != "claude":
             self.assertEqual(agent[agent.index("--cd") + 1], str(wt))
-        layout = next(c for c in calls if c[:2] in (["workspace", "create"], ["tab", "create"]))
-        self.assertEqual(layout[layout.index("--cwd") + 1], str(wt))
+        parent = next(c for c in calls if c[:2] == ["workspace", "create"])
+        self.assertEqual(parent[parent.index("--cwd") + 1], str(repo))
+        layout = next(c for c in calls if c[:2] == ["worktree", "open"])
+        self.assertEqual(layout[layout.index("--path") + 1], str(wt))
+        shared_project = json.loads((self.root / "projects/lab.json").read_text())
+        local_binding = json.loads((self.root / "bindings/projects/lab.json").read_text())
+        self.assertNotIn("repository_workspaces", shared_project)
+        self.assertEqual(local_binding["repository_workspaces"][0]["repository"], str(repo))
         self.assertEqual(r["cwd"], str(wt))
         self.assertEqual(agent[agent.index("--add-dir") + 1], str(self.root))
         (wt / "example.txt").write_text("changed")
@@ -1244,6 +1276,115 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(resumed["id"], r["id"])
         self.assertEqual(resumed["worktrees"], r["worktrees"])
         self.assertEqual((wt / "example.txt").read_text(), "changed")
+
+    def recovery_repo(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        self.git(repo, "init", "-b", "main")
+        self.git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init")
+        return repo
+
+    def test_recover_layout_after_pending_cleanup_write_failure(self):
+        repo = self.recovery_repo()
+        self.create("task1", "--code", "--repo", str(repo))
+        fake = self.root / "bin/herdr"
+        fake.write_text(fake.read_text().replace('elif a[:2] == ["worktree", "open"]:\n', 'elif a[:2] == ["worktree", "open"]:\n    os.chmod(os.environ["FAULT_PROJECT_DIR"], 0o500)\n'))
+        directory = self.root / "bindings/projects"
+        self.env["FAULT_PROJECT_DIR"] = str(directory)
+        try:
+            opened = self.cli("open", "task1")[0]
+            run = self.wait_run(opened["run"], "launch_failed")
+            while self.cli("run", run["id"])["launcher_alive"]:
+                time.sleep(0.01)
+        finally:
+            directory.chmod(0o700)
+        self.assertIsNotNone(run["pane"])
+        # Confirm the same checkout and free pane, without creating anything.
+        fake.write_text(fake.read_text().replace('elif a[:2] == ["worktree", "list"]:\n', 'elif a[:2] == ["worktree", "list"]:\n    print(json.dumps({"result":{"source":{"repo_root":os.environ["RECOVER_REPO"]},"worktrees":[{"path":os.environ["RECOVER_PATH"],"open_workspace_id":"w7"}]}}));sys.exit(0)\n'))
+        self.env.update(RECOVER_REPO=str(repo), RECOVER_PATH=run["worktrees"][0]["path"])
+        # The fake normally reports a running codex on pane list.
+        self.env["FAKE_KIND"] = ""
+        args = ("recover-layout", "--run", run["id"], "--workspace", run["workspace"], "--pane", run["pane"])
+        # Convert the fixture's empty agent label into Herdr's null agent.
+        fake.write_text(fake.read_text().replace('"agent": os.environ.get("FAKE_KIND", "codex")}', '"agent": os.environ.get("FAKE_KIND", "codex") or None}'))
+        self.cli(*args)
+        self.cli(*args)
+        project = self.cli("show", "projects", "lab")
+        self.assertNotIn("layout_pending", project)
+        self.assertEqual(sum(c[:2] == ["worktree", "open"] for c in self.calls()), 1)
+        self.assertFalse(any(c[:2] == ["agent", "start"] for c in self.calls()))
+
+    def test_recover_layout_replaces_only_missing_parent(self):
+        repo = self.recovery_repo()
+        self.create("task1", "--code", "--repo", str(repo))
+        first = self.start()
+        while self.cli("run", first["id"])["launcher_alive"]:
+            time.sleep(0.01)
+        self.create("task2", "--code", "--repo", str(repo))
+        fake = self.root / "bin/herdr"
+        prefix = 'elif a[:2] == ["worktree", "list"]:\n'
+        replacement = prefix + '    if a[a.index("--workspace")+1] == "w7":\n        print(json.dumps({"error":{"code":"workspace_not_found"}}),file=sys.stderr);sys.exit(1)\n    print(json.dumps({"result":{"source":{"repo_root":os.environ["RECOVER_REPO"]},"worktrees":[{"path":os.environ["RECOVER_REPO"],"open_workspace_id":"w8"}]}}));sys.exit(0)\n'
+        fake.write_text(fake.read_text().replace(prefix, replacement))
+        self.env["RECOVER_REPO"] = str(repo)
+        opened = self.cli("open", "task2")[0]
+        run = self.wait_run(opened["run"], "launch_failed")
+        while self.cli("run", run["id"])["launcher_alive"]:
+            time.sleep(0.01)
+        args = ("recover-layout", "--run", run["id"], "--workspace", "w8")
+        self.cli(*args, ok=False)  # Existing parent must not be overwritten.
+        self.env["FAKE_GET_ERROR"] = "timeout"
+        self.cli(*args, ok=False)
+        self.env["FAKE_GET_ERROR"] = "workspace_not_found"
+        self.cli(*args)
+        project = self.cli("show", "projects", "lab")
+        self.assertEqual(project["repository_workspaces"][0]["workspace"], "w8")
+        self.assertNotIn("layout_pending", project)
+
+    def test_worktree_layout_failure_is_not_retried_blindly(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        self.git(repo, "init", "-b", "main")
+        self.git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init")
+        self.create("task1", "--code", "--repo", str(repo))
+        self.env["FAKE_WORKTREE_FAIL"] = "1"
+        opened = self.cli("open", "task1")[0]
+        run = self.wait_run(opened["run"], "launch_failed")
+        self.assertEqual(run["layout_intent"]["kind"], "worktree_open")
+        self.assertTrue(Path(run["worktrees"][0]["path"]).exists())
+        self.env.pop("FAKE_WORKTREE_FAIL")
+        result = self.cli("open", "task1", ok=False)[0]
+        self.assertEqual(result["action"], "error")
+        self.assertEqual(sum(c[:2] == ["worktree", "open"] for c in self.calls()), 1)
+
+    def test_multiple_repositories_use_first_as_workspace_and_add_second(self):
+        repos = [self.root / "repo1", self.root / "repo2"]
+        for repo in repos:
+            repo.mkdir()
+            self.git(repo, "init", "-b", "main")
+            self.git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init")
+        self.create("task1", "--code", "--repo", str(repos[0]), "--repo", str(repos[1]))
+        run = self.start()
+        self.assertEqual(run["repository_workspace"]["repository"], str(repos[0]))
+        self.assertEqual(run["cwd"], run["worktrees"][0]["path"])
+        agent = next(c for c in self.calls() if c[:2] == ["agent", "start"])
+        self.assertIn(run["worktrees"][1]["path"], agent)
+        self.assertEqual(sum(c[:2] == ["worktree", "open"] for c in self.calls()), 1)
+
+    def test_worktree_timeout_recovers_only_when_layout_absence_is_proven(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        self.git(repo, "init", "-b", "main")
+        self.git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init")
+        self.create("task1", "--code", "--repo", str(repo))
+        self.env["FAKE_WORKTREE_FAIL"] = "1"
+        first = self.cli("open", "task1")[0]
+        old = self.wait_run(first["run"], "launch_failed")
+        self.env.pop("FAKE_WORKTREE_FAIL")
+        self.env["FAKE_NO_LAYOUT"] = "1"
+        second = self.cli("open", "task1")[0]
+        run = self.wait_run(second["run"])
+        self.assertEqual(run["worktrees"], old["worktrees"])
+        self.assertEqual(sum(c[:2] == ["worktree", "open"] for c in self.calls()), 2)
 
     def test_finish_after_launch_failed_saves_result_for_review(self):
         self.create()
@@ -1576,7 +1717,10 @@ class ControlTests(unittest.TestCase):
         second_tree = Path(second["worktrees"][0]["path"])
         (second_tree / "second.txt").write_text("second task")
         self.cli("finish", "--run", second["id"], "--report", str(self.root / "report.md"))
+        # This fixture reuses w7; return the explicitly selected checkout.
+        self.env['FAKE_WORKSPACE_PATH'] = str(wt)
         self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
+        self.env['FAKE_WORKSPACE_PATH'] = str(second_tree)
         self.cli("complete", "task2", "--commit-message", "Add second task file")
         self.assertEqual((repo / "example.txt").read_text(), "task change")
         self.assertEqual((repo / "second.txt").read_text(), "second task")

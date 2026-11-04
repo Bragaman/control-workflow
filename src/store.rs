@@ -190,6 +190,7 @@ impl Context {
                     "repositories",
                     "workspace",
                     "workspace_namespace",
+                    "repository_workspaces",
                     "layout_pending",
                     "cwd",
                 ]

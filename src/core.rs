@@ -336,7 +336,9 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
                 Ok(r)
             }
         }
-        "progress" | "block" | "finish" | "recover-start" | "recover-review" => worker(c, name, a),
+        "progress" | "block" | "finish" | "recover-start" | "recover-review" | "recover-layout" => {
+            worker(c, name, a)
+        }
         "answer" => {
             let mut t = c.task(id)?;
             ensure!(t["status"] == "blocked", "Задача не заблокирована");
@@ -491,6 +493,9 @@ fn worker(c: &Context, name: &str, a: &Value) -> Result<Value> {
     let mut t = c.task(s(&r, "task"))?;
     c.current(&t, run)?;
     let dir = c.run_file(run)?.parent().unwrap().to_path_buf();
+    if name == "recover-layout" {
+        return lifecycle::recover_layout(c, &mut r, &mut t, a);
+    }
     if name == "recover-review" {
         ensure!(
             r["id"] == run && r["task"] == t["id"],

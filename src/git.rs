@@ -79,7 +79,7 @@ fn validate_operation(wt: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn validate_worktree(item: &Value) -> Result<()> {
+pub(crate) fn validate_worktree(item: &Value) -> Result<()> {
     let repo = Path::new(s(item, "repository"));
     let wt = Path::new(s(item, "path"));
     ensure!(
