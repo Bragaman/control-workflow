@@ -8,6 +8,19 @@ use anyhow::{Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{fs, io::Write, path::Path};
 
+// Shared, observational context; null means that the run did not record it.
+pub fn run_context(r: &Value) -> Value {
+    json!({
+        "machine": r["herdr_namespace"]["machine"],
+        "herdr_session": r["herdr_session"],
+        "cwd": r["cwd"],
+        "stage": r["status"],
+        "last_action": r["progress"],
+        "startup_error_kind": if r["startup_error"].is_null() { Value::Null } else if r["status"] == "launch_failed" || r["status"] == "launching" { json!("current") } else { json!("historical") },
+        "current_startup_error": if r["status"] == "launch_failed" || r["status"] == "launching" { r["startup_error"].clone() } else { Value::Null },
+        "historical_startup_error": if r["status"] == "launch_failed" || r["status"] == "launching" { Value::Null } else { r["startup_error"].clone() },
+    })
+}
 pub fn profile(c: &Context, t: &Value) -> Result<Value> {
     profile_for_run(c, t, None)
 }
@@ -318,6 +331,7 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
                         "note",
                     ],
                 );
+                extend(&mut v, run_context(&r));
                 v["details"] = json!(format!("run {id}"));
                 v["files"] = json!({});
                 for n in [

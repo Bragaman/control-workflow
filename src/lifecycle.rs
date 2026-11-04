@@ -605,6 +605,7 @@ pub fn start(
 fn summary(c: &Context, t: &Value, r: Option<&Value>, action: &str) -> Result<Value> {
     let mut v = json!({"task":t["id"],"title":t["title"],"status":t["status"],"goal":t["goal"],"action":action});
     let dir = if let Some(r) = r {
+        extend(&mut v, core::run_context(r));
         extend(
             &mut v,
             json!({"run":r["id"],"run_status":r["status"],"state":c.run_file(s(r,"id"))?,"workspace":r["workspace"],"tab":r["tab"],"pane":r["pane"]}),
@@ -741,6 +742,7 @@ pub fn open(c: &Context, a: &Value) -> Result<Value> {
                     if let Some(run) = t["active_run"].as_str()
                         && let Ok(r) = c.read(&c.run_file(run)?)
                     {
+                        extend(&mut v, core::run_context(&r));
                         extend(
                             &mut v,
                             json!({"run":run,"run_status":r["status"],"state":c.run_file(run)?,"tab":r["tab"],"pane":r["pane"]}),

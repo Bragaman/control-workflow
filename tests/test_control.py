@@ -275,8 +275,26 @@ class ControlTests(unittest.TestCase):
         short = self.cli('run', r['id'], '--compact')
         self.assertEqual(short['status'], 'running')
         self.assertIn('progress.md', short['files'])
+        self.assertEqual(short['last_action'], 'Проверяется')
+        self.assertEqual(short['stage'], 'running')
+        self.assertEqual(short['cwd'], r['cwd'])
+        self.assertIsNotNone(short['machine'])
+        self.assertEqual(short['herdr_session'], 'default')
         self.assertNotIn('launch_argv', short)
         self.assertIn('launch_argv', self.cli('run', r['id']))
+
+    def test_compact_legacy_run_has_explicit_unknown_context(self):
+        self.create()
+        run = self.start()
+        file = self.root / "runs" / run["id"] / "state.json"
+        record = json.loads(file.read_text())
+        for field in ("herdr_namespace", "herdr_session", "cwd", "progress", "startup_error"):
+            record.pop(field, None)
+        file.write_text(json.dumps(record))
+        compact = self.cli("run", run["id"], "--compact")
+        for field in ("machine", "herdr_session", "cwd", "last_action", "historical_startup_error"):
+            self.assertIsNone(compact[field])
+        self.assertEqual(compact["stage"], "running")
 
     def test_memory_pages_include_shared_and_keep_legacy_list(self):
         for project, title in [('lab', 'Тема один'), ('shared', 'Тема два'), ('lab', 'Другое')]:
@@ -622,9 +640,17 @@ class ControlTests(unittest.TestCase):
         self.env["FAKE_FAIL"] = "1"
         first = self.cli("open", "task1")[0]
         self.wait_run(first["run"], "launch_failed")
+        failed = self.cli("run", first["run"], "--compact")
+        self.assertTrue(failed["error"])
+        self.assertIsNone(failed["historical_startup_error"])
         self.env.update(FAKE_LIVE="1", FAKE_AUTO_ASSIGNMENT="1")
         result = self.cli("open", "task1")[0]
         self.assertEqual(result["action"], "recovered")
+        compact = self.cli("run", first["run"], "--compact")
+        self.assertNotIn("error", compact)
+        self.assertIn("agent_not_ready", compact["historical_startup_error"])
+        for key in ("machine", "herdr_session", "cwd", "stage", "last_action", "historical_startup_error"):
+            self.assertEqual(result[key], compact[key])
         self.assertEqual(result["run"], first["run"])
         self.assertEqual(result["status"], "running")
         self.assertIn("agent_not_ready", self.cli("run", first["run"])["startup_error"])
