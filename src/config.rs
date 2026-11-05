@@ -243,6 +243,7 @@ impl Context {
     }
     pub fn child(&self) -> std::process::Command {
         let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.env_remove("CONTROL_WORKFLOW_LAUNCHER_FD");
         cmd.arg("--state-root")
             .arg(&self.root)
             .arg("--bindings-root")

@@ -3,6 +3,9 @@ use serde_json::json;
 fn main() {
     let matches = args::cli().get_matches();
     let result = (|| {
+        if matches.subcommand_name() == Some("_launch") {
+            control_workflow::external::seal_launcher_fd()?;
+        }
         let context = Context::load(&matches)?;
         let (name, values) = args::values(&matches)?;
         if name == "mcp" {

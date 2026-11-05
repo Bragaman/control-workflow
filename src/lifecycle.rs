@@ -2,7 +2,7 @@ use crate::{
     args::{s, strings},
     config::{Context, location},
     core::{self, extend},
-    external::{self, error_code, launcher_alive},
+    external::{self, error_code, launcher_may_be_alive},
     git,
     store::{self, key, now},
 };
@@ -180,7 +180,7 @@ fn wait_new_shell(c: &Context, r: &Value) -> Result<()> {
 
 pub fn require_absent(c: &Context, r: &Value) -> Result<()> {
     ensure!(
-        !launcher_alive(r),
+        !launcher_may_be_alive(r),
         "Подготовитель ещё работает: {}",
         s(r, "id")
     );
@@ -221,7 +221,7 @@ pub fn require_absent(c: &Context, r: &Value) -> Result<()> {
 }
 /// Explicit operator confirmation after an ambiguous layout mutation.
 pub fn recover_layout(c: &Context, r: &mut Value, t: &mut Value, a: &Value) -> Result<Value> {
-    ensure!(!launcher_alive(r), "Подготовитель ещё работает");
+    ensure!(!launcher_may_be_alive(r), "Подготовитель ещё работает");
     ensure!(
         ["launch_failed", "launching", "interrupted"].contains(&s(r, "status"))
             && r["agent_start_intent"].is_null(),
@@ -430,8 +430,15 @@ pub fn start(
     let mut previous = if let Some(id) = t["active_run"].as_str().map(str::to_owned) {
         let mut r = c.read(&c.run_file(&id)?)?;
         if !r["worktree_intent"].is_null() {
-            ensure!(!launcher_alive(&r), "Подготовитель ещё работает: {id}");
+            ensure!(
+                !launcher_may_be_alive(&r),
+                "Подготовитель ещё работает: {id}"
+            );
             c.check_namespace(&r)?;
+            ensure!(
+                external::worktree_mutation_state(&r) == external::ProcessState::Absent,
+                "Git worktree add ещё выполняется либо его состояние неизвестно; намерение сохранено, повторный запуск запрещён: {id}"
+            );
             let intended = r["worktree_intent"].clone();
             let path = Path::new(s(&intended, "path"));
             let repo = Path::new(s(&intended, "repository"));
@@ -442,6 +449,10 @@ pub fn start(
                     .ok_or_else(|| anyhow!("Нет worktrees"))?
                     .push(intended);
             } else {
+                ensure!(
+                    intended["command_finished"] == true,
+                    "Git завершился без подтверждённого checkout; исход мутации неизвестен, намерение сохранено: {id}"
+                );
                 let branch = format!("refs/heads/{}", s(&intended, "branch"));
                 ensure!(
                     git::git(repo, &["rev-parse", "--verify", &branch], true)?.is_empty(),
@@ -459,7 +470,10 @@ pub fn start(
             c.update(&mut r, &mut t)?;
         }
         if r["pane"].is_null() && r["layout_intent"]["kind"] == "worktree_open" {
-            ensure!(!launcher_alive(&r), "Подготовитель ещё работает: {id}");
+            ensure!(
+                !launcher_may_be_alive(&r),
+                "Подготовитель ещё работает: {id}"
+            );
             c.check_namespace(&r)?;
             ensure!(
                 p["layout_pending"].is_null() || p["layout_pending"] == id,
@@ -511,6 +525,10 @@ pub fn start(
             old_workspace_idle(c, &p, &ns, None)?;
         }
     }
+    // session list discovers socket paths without proving socket access. Probe
+    // only after validating bindings, before claiming a run or detaching.
+    c.herdr(&["workspace", "list"], ns["session"].as_str())
+        .map_err(|e| anyhow!("Нет доступа к herdr socket: {e}. При запрете песочницы повторите ту же команду вне неё; задача не запущена"))?;
     c.save(&c.path("projects", s(&p, "id"))?, &p)?;
     let repos = if t["repositories"].is_null() {
         &p["repositories"]
@@ -585,14 +603,27 @@ pub fn start(
         .ok_or_else(|| anyhow!("runs должен быть списком"))?
         .push(json!(id));
     t["status"] = json!("running");
+    r["launcher_lease"] = json!(dir.join("launcher.lock"));
     c.update(&mut r, &mut t)?;
-    match external::detach(c.child().arg("_launch").arg(&id), &dir.join("launcher.log")) {
+    let spawn = (|| {
+        fs::write(
+            dir.join("launcher.log"),
+            "launcher: spawning; process visibility is tracked by launcher.lock\n",
+        )?;
+        external::detach_launcher(
+            c.child().arg("_launch").arg(&id),
+            &dir.join("launcher.log"),
+            &dir.join("launcher.lock"),
+        )
+    })();
+    match spawn {
         Ok(child) => {
             r["worker_pid"] = json!(child);
             r["worker_identity"] = json!(external::identity(child as i64));
             c.update(&mut r, &mut t)?;
         }
         Err(e) => {
+            r["launcher_spawn_failed"] = json!(true);
             r["status"] = json!("launch_failed");
             r["error"] = json!(e.to_string());
             t["status"] = json!("blocked");
@@ -601,6 +632,31 @@ pub fn start(
         }
     }
     Ok(json!({"run":id,"status":"launching","state":c.run_file(&id)?}))
+}
+/// Caller holds the state lock. Never discard an ambiguous external mutation.
+pub fn reconcile_launcher(c: &Context, r: &mut Value) -> Result<()> {
+    if r["status"] != "launching"
+        || external::launcher_state(r) != external::ProcessState::Absent
+        || r["agent_start_intent"] == true
+        || r["startup_confirmation_pending"] == true
+    {
+        return Ok(());
+    }
+    let mut t = c.task(s(r, "task"))?;
+    if t["active_run"] != r["id"] {
+        return Ok(());
+    }
+    r["status"] = json!("launch_failed");
+    r["error"] = json!(
+        "launcher завершился до завершения подготовки. Прочитайте launcher.log и docs/recovery.md; повтор open допустим только после проверки сохранённых намерений"
+    );
+    t["status"] = json!("blocked");
+    let f = c
+        .run_file(s(r, "id"))?
+        .with_file_name("startup-checkpoint.md");
+    store::atomic(&f, format!("# Потерян подготовитель\n\n{}\n\nНамерения worktree/layout/start сохранены в state.json; неизвестный исход запрещает слепой повтор.\n", s(r, "error")).as_bytes())?;
+    r["checkpoint"] = json!(f);
+    c.update(r, &mut t)
 }
 fn summary(c: &Context, t: &Value, r: Option<&Value>, action: &str) -> Result<Value> {
     let mut v = json!({"task":t["id"],"title":t["title"],"status":t["status"],"goal":t["goal"],"action":action});
@@ -670,13 +726,18 @@ fn open_one(c: &Context, id: &str, requested: Option<&str>) -> Result<Value> {
         return summary(c, &t, r.as_ref(), "awaiting_answer");
     }
     if let Some(mut r) = r {
+        reconcile_launcher(c, &mut r)?;
         let ns = c.namespace(None)?;
         ensure!(
             (!r["herdr_namespace"].is_null() && r["herdr_namespace"] == ns)
                 || (r["herdr_namespace"].is_null() && r["herdr_session"] == ns["session"]),
             "Запуск принадлежит другому или неподтверждённому namespace"
         );
-        if launcher_alive(&r) {
+        if launcher_may_be_alive(&r) {
+            ensure!(
+                external::launcher_state(&r) != external::ProcessState::Unknown,
+                "Видимость launcher неизвестна (PID namespace или недоступный lease); повторный запуск запрещён. Сверьте подготовитель с хоста и docs/recovery.md"
+            );
             c.check_namespace(&r)?;
             crate::policy::check_reuse(selected.as_ref(), &r)?;
             return summary(c, &t, Some(&r), "preparing");
@@ -765,6 +826,7 @@ pub fn launch(c: &Context, id: &str) -> Result<Value> {
         if t["active_run"] == id
             && r["status"] == "launching"
             && r["worker_pid"].as_u64() == Some(std::process::id() as u64)
+            && external::identity_matches(std::process::id() as i64, &r["worker_identity"])
         {
             r["status"] = json!("launch_failed");
             r["error"] = json!(error.to_string());
@@ -794,7 +856,7 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
         ensure!(
             r["status"] == "launching"
                 && r["worker_pid"].as_u64() == Some(std::process::id() as u64)
-                && r["worker_identity"] == json!(external::identity(std::process::id() as i64)),
+                && external::identity_matches(std::process::id() as i64, &r["worker_identity"]),
             "Запуск уже подготовлен или принадлежит другому подготовителю"
         );
         c.check_namespace(&r)?;
@@ -820,26 +882,31 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
         let branch = format!("control/{}/{id}", s(&t, "id"));
         // Record the intended checkout before invoking Git: a failed or timed-out
         // command may still have created it and must not be repeated blindly.
-        {
+        let mutation_lease = {
             let _lock = c.lock()?;
             t = c.task(s(&r, "task"))?;
             r = c.current(&t, id)?;
+            let lease_path = c
+                .run_file(id)?
+                .with_file_name(format!("worktree-{index}.lock"));
+            let lease = external::ProcessLease::create(&lease_path)?;
             r["worktree_intent"] = json!({"repository":repo,"path":wt,"branch":branch,"main_branch":git::main_branch(Path::new(repo),None)?});
+            r["worktree_intent"]["lease"] = json!(lease_path);
             c.update(&mut r, &mut t)?;
-        }
+            lease
+        };
         fs::create_dir_all(wt.parent().unwrap())?;
-        git::git(
-            Path::new(repo),
-            &[
-                "worktree",
-                "add",
-                "-b",
-                &branch,
-                &wt.to_string_lossy(),
-                "HEAD",
-            ],
-            false,
-        )?;
+        if !git::add_worktree(Path::new(repo), &wt, &branch, &mutation_lease)? {
+            // A normal failed return is evidence of completion. Timeout, spawn
+            // error or parent death never records this: missing files alone
+            // cannot prove that an orphaned descendant will not write later.
+            let _lock = c.lock()?;
+            t = c.task(s(&r, "task"))?;
+            r = c.current(&t, id)?;
+            r["worktree_intent"]["command_finished"] = json!(true);
+            c.update(&mut r, &mut t)?;
+            bail!("Git worktree add не выполнен");
+        }
         r["worktrees"].as_array_mut().unwrap().push(json!({"repository":repo,"path":wt,"branch":branch,"main_branch":git::main_branch(Path::new(repo),None)?}));
         let _lock = c.lock()?;
         let mut fresh = c.current(&c.task(s(&r, "task"))?, id)?;
@@ -1501,7 +1568,7 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
     let mut tab = None;
     if let Some(r) = &r {
         ensure!(
-            r["status"] != "launching" || !launcher_alive(r),
+            r["status"] != "launching" || !launcher_may_be_alive(r),
             "Подготовитель ещё работает; завершение повторите после подготовки запуска"
         );
         if let (Some(saved), Some(selected)) = (r["herdr_session"].as_str(), c.session.as_deref()) {

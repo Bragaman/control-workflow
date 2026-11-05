@@ -888,6 +888,250 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.cli("show", "projects", "lab"), before)
         self.assertFalse((self.root / "runs").exists())
 
+    def test_killed_launcher_without_layout_is_diagnosed_and_retry_is_safe(self):
+        import signal
+        self.create()
+        gate = self.root / 'launcher-entered'
+        fake = self.root / 'bin/herdr'
+        script = fake.read_text().replace(
+            'if a[:3] == ["session", "list", "--json"]:\n',
+            'if a[:3] == ["session", "list", "--json"]:\n'
+            '    if os.environ.get("LAUNCH_GATE") and list(Path(os.environ["CONTROL_PLANE_ROOT"]).glob("runs/*/state.json")):\n'
+            '        Path(os.environ["LAUNCH_GATE"]).touch()\n'
+            '        time.sleep(5)\n')
+        fake.write_text(script)
+        self.env['LAUNCH_GATE'] = str(gate)
+        opened = self.cli('open', 'task1')[0]
+        deadline = time.monotonic() + 3
+        while not gate.exists():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        path = self.root / 'runs' / opened['run'] / 'state.json'
+        run = json.loads(path.read_text())
+        self.assertIsNone(run['pane'])
+        self.assertNotIn('layout_intent', run)
+        os.kill(run['worker_pid'], signal.SIGKILL)
+        self.env.pop('LAUNCH_GATE')
+        # The still-running herdr child must not inherit the launcher's lease.
+        try:
+            diagnosed = self.wait_launcher(opened['run'])
+        finally:
+            os.killpg(run['worker_pid'], signal.SIGKILL)
+        # run must expose and persist the failure, rather than silently launching forever.
+        self.assertEqual(diagnosed['status'], 'launch_failed')
+        self.assertIn('launcher', diagnosed['error'])
+        self.assertEqual(json.loads(path.read_text())['status'], 'launch_failed')
+        retry = self.cli('open', 'task1')[0]
+        self.assertEqual(retry['action'], 'restarted')
+        self.wait_launcher(retry['run'])
+        self.assertEqual(sum(c[:2] == ['workspace', 'create'] for c in self.calls()), 1)
+        self.assertEqual(sum(c[:2] == ['agent', 'start'] for c in self.calls()), 1)
+        self.assertFalse(any(c[:2] == ['agent', 'prompt'] for c in self.calls()))
+
+    def test_killed_after_git_worktree_add_reuses_checkout_on_retry(self):
+        import signal
+        import shutil
+        repo = self.recovery_repo()
+        self.create('task1', '--code', '--repo', str(repo))
+        git = shutil.which('git')
+        gate = self.root / 'git-entered'
+        wrapper = self.root / 'bin/git'
+        wrapper.write_text('#!/usr/bin/env python3\nimport os,subprocess,sys,time\nfrom pathlib import Path\n'
+            + f'code = subprocess.call([{git!r}, *sys.argv[1:]])\n'
+            + 'if code == 0 and "worktree" in sys.argv and "add" in sys.argv and os.environ.get("GIT_GATE"):\n'
+            + '    Path(os.environ["GIT_GATE"]).touch()\n    time.sleep(5)\n'
+            + 'sys.exit(code)\n')
+        wrapper.chmod(0o755)
+        self.env['GIT_GATE'] = str(gate)
+        first = self.cli('open', 'task1')[0]
+        deadline = time.monotonic() + 3
+        while not gate.exists():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        original = self.cli('run', first['run'])
+        intent = original['worktree_intent']
+        os.killpg(original['worker_pid'], signal.SIGKILL)
+        self.env.pop('GIT_GATE')
+        self.assertEqual(self.wait_launcher(first['run'])['status'], 'launch_failed')
+        retry = self.cli('open', 'task1')[0]
+        run = self.wait_launcher(retry['run'])
+        self.assertEqual(run['status'], 'running')
+        self.assertEqual(run['worktrees'][0]['path'], intent['path'])
+        listing = subprocess.check_output([git, '-C', str(repo), 'worktree', 'list', '--porcelain'], text=True)
+        self.assertEqual(listing.count('worktree '), 2)
+        self.assertEqual(sum(c[:2] == ['worktree', 'open'] for c in self.calls()), 1)
+        self.assertEqual(sum(c[:2] == ['agent', 'start'] for c in self.calls()), 1)
+
+    def test_finished_git_failure_without_checkout_allows_safe_retry(self):
+        self.git_failure_recovery(False)
+
+    def test_signaled_git_without_checkout_keeps_unknown_outcome(self):
+        self.git_failure_recovery(True)
+
+    def git_failure_recovery(self, signaled):
+        import shutil
+        repo = self.recovery_repo()
+        self.create('task1', '--code', '--repo', str(repo))
+        git = shutil.which('git')
+        wrapper = self.root / 'bin/git'
+        wrapper.write_text('#!/usr/bin/env python3\nimport os,sys\n'
+            + 'if "worktree" in sys.argv and "add" in sys.argv and os.environ.get("GIT_SIGNAL"): os.kill(os.getpid(), 15)\n'
+            + 'if "worktree" in sys.argv and "add" in sys.argv and os.environ.get("GIT_FAIL"): sys.exit(1)\n'
+            + f'os.execv({git!r}, [{git!r}, *sys.argv[1:]])\n')
+        wrapper.chmod(0o755)
+        self.env['GIT_FAIL'] = '1'
+        if signaled: self.env['GIT_SIGNAL'] = '1'
+        first = self.cli('open', 'task1')[0]
+        failed = self.wait_launcher(first['run'])
+        self.assertEqual(failed['status'], 'launch_failed')
+        if signaled:
+            self.assertNotIn('command_finished', failed['worktree_intent'])
+            self.cli('open', 'task1', ok=False)
+            self.assertEqual(len(self.cli('show', 'tasks', 'task1')['runs']), 1)
+            return
+        self.assertTrue(failed['worktree_intent']['command_finished'])
+        self.env.pop('GIT_FAIL')
+        retry = self.cli('open', 'task1')[0]
+        self.assertEqual(self.wait_launcher(retry['run'])['status'], 'running')
+        listing = subprocess.check_output([git, '-C', str(repo), 'worktree', 'list', '--porcelain'], text=True)
+        self.assertEqual(listing.count('worktree '), 2)
+        self.assertEqual(sum(c[:2] == ['agent', 'start'] for c in self.calls()), 1)
+
+    def test_orphan_git_blocks_retry_until_mutation_finishes(self):
+        self.orphan_git_recovery(False)
+
+    def test_orphan_git_without_checkout_preserves_unknown_outcome(self):
+        self.orphan_git_recovery(True)
+
+    def orphan_git_recovery(self, fail):
+        import signal
+        import shutil
+        repo = self.recovery_repo()
+        self.create('task1', '--code', '--repo', str(repo))
+        git = shutil.which('git')
+        gate = self.root / 'git-gate'
+        wrapper = self.root / 'bin/git'
+        wrapper.write_text('#!/usr/bin/env python3\nimport os,subprocess,sys,time\nfrom pathlib import Path\n'
+            + 'gate = None\n'
+            + 'if "worktree" in sys.argv and "add" in sys.argv and os.environ.get("GIT_GATE"):\n'
+            + '    gate = Path(os.environ["GIT_GATE"])\n    gate.with_suffix(".entered").touch()\n'
+            + '    deadline = time.monotonic() + 8\n'
+            + '    while not gate.exists() and time.monotonic() < deadline: time.sleep(.01)\n'
+            + f'code = 1 if gate and os.environ.get("GIT_FAIL") else subprocess.call([{git!r}, *sys.argv[1:]])\n'
+            + 'if gate: gate.with_suffix(".completed").write_text(str(code))\n'
+            + 'sys.exit(code)\n')
+        wrapper.chmod(0o755)
+        self.env['GIT_GATE'] = str(gate)
+        if fail: self.env['GIT_FAIL'] = '1'
+        first = self.cli('open', 'task1')[0]
+        path = self.root / 'runs' / first['run'] / 'state.json'
+        deadline = time.monotonic() + 3
+        while not gate.with_suffix('.entered').exists():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        original = self.cli('run', first['run'])
+        intent = original['worktree_intent']
+        os.kill(original['worker_pid'], signal.SIGKILL)
+        self.env.pop('GIT_GATE')
+        try:
+            diagnosed = self.wait_launcher(first['run'])
+            self.assertEqual(diagnosed['status'], 'launch_failed')
+            for _ in range(2):
+                refused = self.cli('open', 'task1', ok=False)[0]
+                self.assertIn('Git', refused['error'])
+            self.assertEqual(json.loads(path.read_text())['worktree_intent'], intent)
+            # Missing or legacy lease evidence is unknown, not permission to retry.
+            saved = json.loads(path.read_text())
+            for missing in [None, str(self.root / 'missing.lock')]:
+                changed = json.loads(json.dumps(saved))
+                changed['worktree_intent']['lease'] = missing
+                path.write_text(json.dumps(changed))
+                self.assertEqual(self.cli('run', first['run'])['worktree_mutation_status'], 'unknown')
+                self.cli('open', 'task1', ok=False)
+            path.write_text(json.dumps(saved))
+            self.assertEqual(len(self.cli('show', 'tasks', 'task1')['runs']), 1)
+            self.assertFalse(Path(intent['path']).exists())
+            self.assertFalse(any(c[:2] in (['worktree', 'open'], ['agent', 'start']) for c in self.calls()))
+            gate.touch()
+            deadline = time.monotonic() + 3
+            while not gate.with_suffix('.completed').exists():
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.01)
+            self.assertEqual(gate.with_suffix('.completed').read_text(), '1' if fail else '0')
+            # A process may write its completion marker just before closing descriptors.
+            deadline = time.monotonic() + 3
+            while self.cli('run', first['run'])['worktree_mutation_status'] != 'absent':
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.01)
+            if fail:
+                refused = self.cli('open', 'task1', ok=False)[0]
+                self.assertIn('исход мутации неизвестен', refused['error'])
+                self.assertEqual(json.loads(path.read_text())['worktree_intent'], intent)
+                self.assertEqual(len(self.cli('show', 'tasks', 'task1')['runs']), 1)
+                return
+            retry = self.cli('open', 'task1')[0]
+            run = self.wait_launcher(retry['run'])
+            self.assertEqual(run['worktrees'][0]['path'], intent['path'])
+            listing = subprocess.check_output([git, '-C', str(repo), 'worktree', 'list', '--porcelain'], text=True)
+            self.assertEqual(listing.count('worktree '), 2)
+            self.assertEqual(sum(c[:2] == ['worktree', 'open'] for c in self.calls()), 1)
+            self.assertEqual(sum(c[:2] == ['agent', 'start'] for c in self.calls()), 1)
+        finally:
+            gate.touch()
+            try: os.killpg(original['worker_pid'], signal.SIGKILL)
+            except ProcessLookupError: pass
+
+    def test_socket_denied_fails_before_claiming_or_spawning(self):
+        self.create()
+        fake = self.root / 'bin/herdr'
+        fake.write_text(fake.read_text().replace(
+            'if os.environ.get("FAKE_UNAVAILABLE"):',
+            'if a[:2] == ["workspace", "list"]:\n'
+            '    print("socket: Operation not permitted", file=sys.stderr)\n'
+            '    sys.exit(1)\n'
+            'if os.environ.get("FAKE_UNAVAILABLE"):'))
+        for _ in range(2):
+            result = self.cli('open', 'task1', ok=False)[0]
+            self.assertIn('Operation not permitted', result['error'])
+        self.assertIsNone(self.cli('show', 'tasks', 'task1')['active_run'])
+        self.assertFalse((self.root / 'runs').exists())
+        self.assertFalse(any(c[:2] in (['workspace', 'create'], ['agent', 'start']) for c in self.calls()))
+
+    @unittest.skipUnless(os.uname().sysname == 'Linux', 'Linux PID namespaces')
+    def test_launcher_lease_overrides_pid_visibility_and_unknown_blocks_retry(self):
+        self.create()
+        gate = self.root / 'start-gate'
+        self.env['FAKE_START_GATE'] = str(gate)
+        opened = self.cli('open', 'task1')[0]
+        deadline = time.monotonic() + 3
+        while not gate.with_suffix('.entered').exists():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        path = self.root / 'runs' / opened['run'] / 'state.json'
+        original = json.loads(path.read_text())
+        try:
+            changed = dict(original, worker_pid=2147483647)
+            changed['worker_identity'] = dict(original['worker_identity'], pid_namespace='pid:[foreign]')
+            path.write_text(json.dumps(changed))
+            self.assertIs(self.cli('run', opened['run'])['launcher_alive'], True)
+            self.assertEqual(self.cli('open', 'task1')[0]['action'], 'preparing')
+            del changed['launcher_lease']
+            path.write_text(json.dumps(changed))
+            unknown = self.cli('run', opened['run'], '--compact')
+            self.assertIsNone(unknown['launcher_alive'])
+            self.assertEqual(unknown['launcher_status'], 'unknown')
+            self.assertEqual(unknown['status'], 'launching')
+            for _ in range(2):
+                refused = self.cli('open', 'task1', ok=False)[0]
+                self.assertIn('неизвестна', refused['error'])
+            self.cli('interrupt', 'task1', '--reason', 'not proven absent', ok=False)
+            self.assertEqual(len(self.cli('show', 'tasks', 'task1')['runs']), 1)
+            self.assertEqual(sum(c[:2] == ['agent', 'start'] for c in self.calls()), 1)
+        finally:
+            path.write_text(json.dumps(original))
+            gate.touch()
+        self.wait_launcher(opened['run'])
+
     def test_second_launcher_cannot_change_owned_launch(self):
         self.create()
         self.env["FAKE_DELAY"] = "1"
@@ -1539,6 +1783,7 @@ class ControlTests(unittest.TestCase):
         cases += [(dict(task, active_run="another-run"), run),
                   (task, dict(run, id="another-run")), (task, dict(run, task="missing-task")),
                   (task, dict(run, worker_pid=os.getpid(), worker_identity=None))]
+        cases[-1][1].pop('launcher_lease', None)
         for changed_task, changed_run in cases:
             with self.subTest(task=changed_task, run=changed_run):
                 task_file.write_text(json.dumps(changed_task))

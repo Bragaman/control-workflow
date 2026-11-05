@@ -18,6 +18,22 @@ pub fn git(repo: &Path, args: &[&str], optional: bool) -> Result<String> {
     }
     Ok(out.trim().into())
 }
+pub fn add_worktree(
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+    lease: &external::ProcessLease,
+) -> Result<bool> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(repo)
+        .args(["worktree", "add", "-b", branch])
+        .arg(path)
+        .arg("HEAD");
+    lease.inherit(&mut cmd);
+    let (ok, _, _) = external::output(&mut cmd, Duration::from_secs(60))?;
+    Ok(ok)
+}
 pub fn main_branch(repo: &Path, saved: Option<&str>) -> Result<String> {
     if let Some(saved) = saved {
         git(

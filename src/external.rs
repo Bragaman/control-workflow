@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::{
     io::{Read, Seek, SeekFrom},
+    os::fd::AsRawFd,
     os::unix::process::CommandExt,
     path::Path,
     process::{Command, Stdio},
@@ -35,6 +36,10 @@ pub fn output(cmd: &mut Command, timeout: Duration) -> Result<(bool, String, Str
         }
         thread::sleep(Duration::from_millis(2));
     };
+    ensure!(
+        status.code().is_some(),
+        "Внешняя команда завершена сигналом; исход операции неизвестен"
+    );
     out.seek(SeekFrom::Start(0))?;
     err.seek(SeekFrom::Start(0))?;
     let mut stdout = String::new();
@@ -81,6 +86,149 @@ pub fn detach(cmd: &mut Command, log: &Path) -> Result<u32> {
     });
     Ok(pid)
 }
+/// Acquired before persisting an intent, inherited before exec, released on exit.
+/// The descriptor remains locked even if the parent is killed during a mutation.
+pub struct ProcessLease(std::fs::File);
+impl ProcessLease {
+    pub fn create(path: &Path) -> Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        ensure!(
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
+            "Не удалось удержать process lease: {}",
+            std::io::Error::last_os_error()
+        );
+        Ok(Self(file))
+    }
+    pub fn inherit(&self, cmd: &mut Command) {
+        let fd = self.0.as_raw_fd();
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+}
+/// The launcher seals its own descriptor before spawning herdr or Git; mutations
+/// use separate leases so orphaned children cannot be mistaken for finished work.
+pub fn detach_launcher(cmd: &mut Command, log: &Path, path: &Path) -> Result<u32> {
+    let lease = ProcessLease::create(path)?;
+    cmd.env(
+        "CONTROL_WORKFLOW_LAUNCHER_FD",
+        lease.0.as_raw_fd().to_string(),
+    );
+    lease.inherit(cmd);
+    detach(cmd, log)
+}
+pub fn seal_launcher_fd() -> Result<()> {
+    if let Ok(value) = std::env::var("CONTROL_WORKFLOW_LAUNCHER_FD") {
+        let fd: i32 = value.parse()?;
+        ensure!(
+            fd > 2 && unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == 0,
+            "Не удалось защитить launcher lease descriptor"
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessState {
+    Alive,
+    Absent,
+    Unknown,
+}
+impl ProcessState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Alive => "alive",
+            Self::Absent => "absent",
+            Self::Unknown => "unknown",
+        }
+    }
+    pub fn alive(self) -> Option<bool> {
+        match self {
+            Self::Alive => Some(true),
+            Self::Absent => Some(false),
+            Self::Unknown => None,
+        }
+    }
+}
+pub fn launcher_state(r: &Value) -> ProcessState {
+    use ProcessState::*;
+    if r["launcher_spawn_failed"] == true {
+        return Absent;
+    }
+    if let Some(path) = r["launcher_lease"].as_str() {
+        return lease_state(Path::new(path));
+    }
+    let pid = r["worker_pid"].as_i64().unwrap_or(0);
+    if pid <= 0 {
+        return Unknown;
+    }
+    let saved = &r["worker_identity"];
+    let current = identity(std::process::id() as i64);
+    if let Some(current) = &current {
+        if !saved["boot_id"].is_null() && saved["boot_id"] != current["boot_id"] {
+            return Absent;
+        }
+        #[cfg(target_os = "linux")]
+        if saved["pid_namespace"].is_null() || saved["pid_namespace"] != current["pid_namespace"] {
+            // A PID can be absent or reused here while the host launcher is alive.
+            // Matching legacy identity is positive evidence; absence is not.
+            return if pid_alive(pid) && process_running(pid) && identity_matches(pid, saved) {
+                Alive
+            } else {
+                Unknown
+            };
+        }
+    } else {
+        return Unknown;
+    }
+    if !pid_alive(pid) {
+        return Absent;
+    }
+    match identity(pid) {
+        Some(actual) if actual == *saved => {
+            if process_running(pid) {
+                Alive
+            } else {
+                Absent
+            }
+        }
+        Some(_) => Absent,
+        None => Unknown,
+    }
+}
+pub fn lease_state(path: &Path) -> ProcessState {
+    use ProcessState::*;
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+    else {
+        return Unknown;
+    };
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Absent;
+    }
+    if std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK) {
+        Alive
+    } else {
+        Unknown
+    }
+}
+pub fn worktree_mutation_state(r: &Value) -> ProcessState {
+    r["worktree_intent"]["lease"]
+        .as_str()
+        .map(|p| lease_state(Path::new(p)))
+        .unwrap_or(ProcessState::Unknown)
+}
 pub fn error_code(error: &anyhow::Error) -> String {
     serde_json::from_str::<Value>(&error.to_string())
         .ok()
@@ -97,7 +245,7 @@ pub fn identity(pid: i64) -> Option<Value> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let fields: Vec<_> = stat.rsplit_once(')')?.1.split_whitespace().collect();
     Some(
-        json!({"boot_id":fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?.trim(),"start_ticks":fields.get(19)?}),
+        json!({"boot_id":fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?.trim(),"start_ticks":fields.get(19)?,"pid_namespace":fs::read_link("/proc/self/ns/pid").ok()?.to_string_lossy()}),
     )
 }
 #[cfg(target_os = "linux")]
@@ -152,18 +300,25 @@ pub fn identity(pid: i64) -> Option<Value> {
 pub fn process_running(pid: i64) -> bool {
     mac_info(pid).is_some_and(|v| v.fields[1] != 5)
 }
-pub fn launcher_alive(r: &Value) -> bool {
-    let pid = r["worker_pid"].as_i64().unwrap_or(0);
-    pid_alive(pid)
-        && (r["worker_identity"].is_null()
-            || identity(pid).is_some_and(|i| i == r["worker_identity"]))
+pub fn launcher_may_be_alive(r: &Value) -> bool {
+    // Internal recovery guards must treat unknown visibility as potentially alive.
+    launcher_state(r) != ProcessState::Absent
+}
+/// Older records predate pid_namespace; positive identity still remains useful.
+pub fn identity_matches(pid: i64, saved: &Value) -> bool {
+    identity(pid).is_some_and(|mut actual| {
+        if saved["pid_namespace"].is_null() {
+            actual.as_object_mut().unwrap().remove("pid_namespace");
+        }
+        actual == *saved
+    })
 }
 pub fn request_alive(r: &Value) -> bool {
     let pid = r["pid"].as_i64().unwrap_or(0);
     pid_alive(pid)
         && process_running(pid)
         && !r["identity"].is_null()
-        && identity(pid).is_some_and(|v| v == r["identity"])
+        && identity_matches(pid, &r["identity"])
 }
 pub fn machine_id() -> Result<String> {
     #[cfg(target_os = "linux")]
@@ -255,7 +410,10 @@ impl Context {
         }
         cmd.args(["session", "list", "--json"]);
         let (ok, out, err) = output(&mut cmd, Duration::from_secs(60))?;
-        ensure!(ok, "{err}");
+        ensure!(
+            ok,
+            "Не удалось проверить namespace herdr: {err}. При запрете сокета песочницей повторите ту же команду вне неё с разрешением"
+        );
         let v: Value = serde_json::from_str(&out)?;
         let inherited = std::env::var("HERDR_SOCKET_PATH").ok();
         let matches = v["sessions"]

@@ -300,18 +300,40 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
         "show" => c.read(&c.path(s(a, "kind"), id)?),
         "run" => {
             let mut r = c.read(&c.run_file(id)?)?;
+            if r["status"] == "launching"
+                && external::launcher_state(&r) == external::ProcessState::Absent
+                && r["agent_start_intent"] != true
+                && r["startup_confirmation_pending"] != true
+            {
+                let _lock = c.lock()?;
+                r = c.read(&c.run_file(id)?)?;
+                lifecycle::reconcile_launcher(c, &mut r)?;
+            }
             let f = c.run_file(id)?.with_file_name("completion-request.json");
             if f.exists() {
                 let req = c.read(&f)?;
                 r["completion_process_alive"] = json!(external::request_alive(&req));
                 r["completion_request"] = req;
             }
-            r["launcher_alive"] = json!(external::launcher_alive(&r));
+            let launcher = external::launcher_state(&r);
+            r["launcher_alive"] = json!(launcher.alive());
+            r["launcher_status"] = json!(launcher.as_str());
+            if !r["worktree_intent"].is_null() {
+                r["worktree_mutation_status"] =
+                    json!(external::worktree_mutation_state(&r).as_str());
+            }
+            if r["status"] == "launching" && launcher != external::ProcessState::Alive {
+                r["launcher_diagnostic"] = json!(if launcher == external::ProcessState::Unknown {
+                    "Видимость launcher неизвестна; отсутствие PID не доказывает остановку. Повторный запуск запрещён до сверки"
+                } else {
+                    "launcher завершился; исход agent start неизвестен. Сверьте исполнителя и assignment через open/recover-start, не повторяйте start/prompt"
+                });
+            }
             let updated = chrono::DateTime::parse_from_rfc3339(s(&r, "updated_at"))?;
             r["seconds_since_update"] =
                 json!((chrono::Utc::now() - updated.with_timezone(&chrono::Utc)).num_seconds());
             r["note"] = json!(
-                "launcher_alive относится только к подготовителю; состояние исполнителя подтверждается его файлами, а не этим PID"
+                "launcher_alive относится только к подготовителю; null означает неизвестную видимость, false требует доказанного отсутствия. Исполнитель проверяется отдельно"
             );
             if a["compact"] == true {
                 let mut v = subset(
@@ -324,6 +346,9 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
                         "pane",
                         "tab",
                         "launcher_alive",
+                        "launcher_status",
+                        "worktree_mutation_status",
+                        "launcher_diagnostic",
                         "seconds_since_update",
                         "completion_process_alive",
                         "error",
@@ -381,7 +406,7 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
             );
             let mut r = c.current(&t, s(&t, "active_run"))?;
             ensure!(
-                r["status"] != "launching" || !external::launcher_alive(&r),
+                r["status"] != "launching" || !external::launcher_may_be_alive(&r),
                 "Подготовитель ещё работает"
             );
             r["status"] = json!("interrupted");
@@ -519,7 +544,10 @@ fn worker(c: &Context, name: &str, a: &Value) -> Result<Value> {
             r["status"] == "review" && ["ready", "review"].contains(&s(&t, "status")),
             "Восстановление review доступно только для task=ready/review и run=review"
         );
-        ensure!(!external::launcher_alive(&r), "Подготовитель ещё работает");
+        ensure!(
+            !external::launcher_may_be_alive(&r),
+            "Подготовитель ещё работает"
+        );
         let result_file = dir.join("result.md");
         let report = fs::read_to_string(&result_file)?;
         ensure!(!report.trim().is_empty(), "Сохранённый результат пуст");
@@ -546,7 +574,10 @@ fn worker(c: &Context, name: &str, a: &Value) -> Result<Value> {
             ["launch_failed", "interrupted"].contains(&s(&r, "status")),
             "Восстановление старта доступно только для launch_failed/interrupted"
         );
-        ensure!(!external::launcher_alive(&r), "Подготовитель ещё работает");
+        ensure!(
+            !external::launcher_may_be_alive(&r),
+            "Подготовитель ещё работает"
+        );
         ensure!(
             lifecycle::agent_state(c, &r)? == "confirmed",
             "Терминал не подтверждает исполнителя с заданием этого запуска"

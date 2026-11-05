@@ -18,6 +18,25 @@ fn context(dir: &Path) -> Context {
     Context::load(&m).unwrap()
 }
 
+fn assert_lease_released(worker: &Value) {
+    use control_workflow::external::{self, ProcessState};
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let state = external::launcher_state(worker);
+        if state == ProcessState::Absent {
+            return;
+        }
+        assert_eq!(state, ProcessState::Alive);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "lease was not released"
+        );
+        // Parallel tests can fork with our CLOEXEC descriptor still inherited
+        // until their child execs. This conservative Alive is correct.
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn portable_policy_validation_precedence_and_legacy_compatibility() {
     use control_workflow::{core, policy};
@@ -434,9 +453,18 @@ fn native_process_identity_detects_previous_boot_and_pid_reuse() {
     let identity = external::identity(pid).expect("current process identity");
     assert!(external::process_running(pid));
     let mut worker = json!({"worker_pid":pid,"worker_identity":identity});
-    assert!(external::launcher_alive(&worker));
+    assert!(external::launcher_may_be_alive(&worker));
+    let mut legacy_identity = worker["worker_identity"].clone();
+    legacy_identity
+        .as_object_mut()
+        .unwrap()
+        .remove("pid_namespace");
+    assert!(external::identity_matches(pid, &legacy_identity));
+    assert!(external::request_alive(
+        &json!({"pid":pid,"identity":legacy_identity})
+    ));
     worker["worker_identity"]["boot_id"] = json!("previous-boot");
-    assert!(!external::launcher_alive(&worker));
+    assert!(!external::launcher_may_be_alive(&worker));
     worker["worker_identity"] = external::identity(pid).unwrap();
     #[cfg(target_os = "linux")]
     {
@@ -447,8 +475,59 @@ fn native_process_identity_detects_previous_boot_and_pid_reuse() {
         worker["worker_identity"]["start_usec"] =
             json!(worker["worker_identity"]["start_usec"].as_u64().unwrap() + 1);
     }
-    assert!(!external::launcher_alive(&worker));
+    assert!(!external::launcher_may_be_alive(&worker));
     assert!(!external::request_alive(
         &json!({"pid":pid,"identity":null})
     ));
+}
+
+#[test]
+fn launcher_lease_is_authoritative_and_missing_evidence_is_unknown() {
+    use control_workflow::external::{self, ProcessState::*};
+    use std::os::fd::AsRawFd;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("launcher.lock");
+    let lease = std::fs::File::create(&path).unwrap();
+    assert_eq!(
+        unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let r = json!({"worker_pid":2147483647,"launcher_lease":path});
+    assert_eq!(external::launcher_state(&r), Alive);
+    drop(lease);
+    assert_lease_released(&r);
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(external::launcher_state(&r), Unknown);
+    assert!(
+        external::launcher_may_be_alive(&r),
+        "unknown must block recovery"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let legacy = json!({"worker_pid":2147483647,"worker_identity":{"boot_id":external::identity(std::process::id() as i64).unwrap()["boot_id"],"start_ticks":"1"}});
+        assert_eq!(external::launcher_state(&legacy), Unknown);
+    }
+}
+
+#[test]
+fn failed_launcher_spawn_releases_lease() {
+    use control_workflow::external;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("launcher.lock");
+    let result = external::detach_launcher(
+        &mut Command::new(temp.path().join("missing-executable")),
+        &temp.path().join("launcher.log"),
+        &path,
+    );
+    assert!(result.is_err());
+    assert_lease_released(&json!({"launcher_lease":path}));
+}
+
+#[test]
+fn signaled_command_does_not_confirm_mutation_completion() {
+    let result = control_workflow::external::output(
+        Command::new("/bin/sh").args(["-c", "kill -TERM $$"]),
+        std::time::Duration::from_secs(2),
+    );
+    assert!(result.unwrap_err().to_string().contains("сигналом"));
 }
