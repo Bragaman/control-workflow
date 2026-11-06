@@ -371,6 +371,13 @@ fn old_workspace_idle(c: &Context, p: &Value, ns: &Value, current: Option<&str>)
             && r["project"] == p["id"]
             && r["workspace"] == p["workspace"]
         {
+            // Finished cleanup is final evidence. Legacy launcher PIDs may be
+            // invisible now, and Herdr may already have reused their pane IDs.
+            if ["done", "cancelled"].contains(&s(&r, "status"))
+                && ["closed", "no_tab"].contains(&s(&r["cleanup"], "status"))
+            {
+                continue;
+            }
             ensure!(
                 (r["herdr_namespace"].is_null() || r["herdr_namespace"] == *ns)
                     && r["herdr_session"] == ns["session"],
@@ -456,6 +463,52 @@ pub fn start(
     let ns = c.namespace(None)?;
     let mut previous = if let Some(id) = t["active_run"].as_str().map(str::to_owned) {
         let mut r = c.read(&c.run_file(&id)?)?;
+        // Old launchers journalled a parent creation before even reading the
+        // saved binding. Only this precise read failure proves no create/open
+        // was sent; ambiguous creation failures must keep their journal.
+        if r["pane"].is_null()
+            && r["agent_start_intent"].is_null()
+            && r["layout_intent"]["kind"] == "repository_workspace"
+            && serde_json::from_str::<Value>(s(&r, "error")).is_ok_and(|e| {
+                e["error"]["code"] == "workspace_not_found" && e["id"] == "cli:worktree:list"
+            })
+        {
+            ensure!(
+                !launcher_may_be_alive(&r),
+                "Подготовитель ещё работает: {id}"
+            );
+            c.check_namespace(&r)?;
+            ensure!(
+                r["herdr_namespace"] == ns,
+                "Namespace прежнего запуска изменился"
+            );
+            ensure!(
+                p["layout_pending"].is_null() || p["layout_pending"] == id,
+                "Другой запуск ожидает сверки layout"
+            );
+            let binding = p["repository_workspaces"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|b| {
+                    b["repository"] == r["layout_intent"]["repository"] && b["namespace"] == ns
+                })
+                .ok_or_else(|| anyhow!("Не найдена привязка для проверки прежнего родителя"))?;
+            match c.herdr(
+                &["worktree", "list", "--workspace", s(binding, "workspace")],
+                r["herdr_session"].as_str(),
+            ) {
+                Err(e) if error_code(&e) == "workspace_not_found" => {}
+                Err(e) => return Err(e),
+                Ok(_) => bail!("Прежний родитель существует; нужна сверка сохранённого layout"),
+            }
+            r["layout_probe_recovery"] =
+                json!({"at":now(),"intent":r["layout_intent"],"error":r["error"]});
+            r.as_object_mut().unwrap().remove("layout_intent");
+            p.as_object_mut().unwrap().remove("layout_pending");
+            c.save(&c.path("projects", s(&p, "id"))?, &p)?;
+            c.update(&mut r, &mut t)?;
+        }
         if !r["worktree_intent"].is_null() {
             ensure!(
                 !launcher_may_be_alive(&r),
@@ -507,7 +560,7 @@ pub fn start(
                 "Другой запуск ожидает сверки layout"
             );
             let intent = &r["layout_intent"];
-            let listed = c.herdr(
+            let listed = match c.herdr(
                 &[
                     "worktree",
                     "list",
@@ -515,7 +568,16 @@ pub fn start(
                     s(intent, "parent_workspace"),
                 ],
                 r["herdr_session"].as_str(),
-            )?;
+            ) {
+                Ok(listed) => listed,
+                // A vanished parent does not prove its child disappeared.
+                // Query by repository before allowing another worktree open.
+                Err(e) if error_code(&e) == "workspace_not_found" => c.herdr(
+                    &["worktree", "list", "--cwd", s(intent, "repository")],
+                    r["herdr_session"].as_str(),
+                )?,
+                Err(e) => return Err(e),
+            };
             ensure!(
                 listed["source"]["repo_root"] == intent["repository"],
                 "Родительский workspace относится к другому репозиторию"
@@ -798,16 +860,7 @@ fn open_one(c: &Context, id: &str, requested: Option<&str>) -> Result<Value> {
     start(c, id, !t["active_run"].is_null(), true, requested)?;
     let t = c.task(id)?;
     let r = c.read(&c.run_file(s(&t, "active_run"))?)?;
-    summary(
-        c,
-        &t,
-        Some(&r),
-        if r["previous_run"].is_null() {
-            "started"
-        } else {
-            "restarted"
-        },
-    )
+    summary(c, &t, Some(&r), "preparing")
 }
 pub fn open(c: &Context, a: &Value) -> Result<Value> {
     c.require_herdr()?;
@@ -923,7 +976,8 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
             lease
         };
         fs::create_dir_all(wt.parent().unwrap())?;
-        if !git::add_worktree(Path::new(repo), &wt, &branch, &mutation_lease)? {
+        let (ok, diagnostic) = git::add_worktree(Path::new(repo), &wt, &branch, &mutation_lease)?;
+        if !ok {
             // A normal failed return is evidence of completion. Timeout, spawn
             // error or parent death never records this: missing files alone
             // cannot prove that an orphaned descendant will not write later.
@@ -932,7 +986,7 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
             r = c.current(&t, id)?;
             r["worktree_intent"]["command_finished"] = json!(true);
             c.update(&mut r, &mut t)?;
-            bail!("Git worktree add не выполнен");
+            bail!("Git worktree add не выполнен: {diagnostic}");
         }
         r["worktrees"].as_array_mut().unwrap().push(json!({"repository":repo,"path":wt,"branch":branch,"main_branch":git::main_branch(Path::new(repo),None)?}));
         let _lock = c.lock()?;
@@ -995,29 +1049,56 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
             // of the project's ordinary workspace used by no-code tasks.
             let first = r["worktrees"][0].clone();
             let repo = s(&first, "repository");
-            let entry = p["repository_workspaces"]
+            ensure!(
+                p["repository_workspaces"].is_null() || p["repository_workspaces"].is_array(),
+                "Некорректные привязки репозиториев"
+            );
+            let entries = p["repository_workspaces"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .find(|v| v["repository"] == repo && v["namespace"] == ns)
-                .cloned();
-            r["layout_intent"] =
-                json!({"kind":"repository_workspace","repository":repo,"path":first["path"]});
-            p["layout_pending"] = json!(id);
-            c.save(&c.path("projects", s(&p, "id"))?, &p)?;
-            c.update(&mut r, &mut t)?;
-            let parent = if let Some(entry) = entry {
-                let parent = s(&entry, "workspace").to_owned();
-                let listed = c.herdr(
-                    &["worktree", "list", "--workspace", &parent],
-                    r["herdr_session"].as_str(),
-                )?;
+                .filter(|v| v["repository"] == repo && v["namespace"] == ns)
+                .collect::<Vec<_>>();
+            ensure!(
+                entries.len() <= 1,
+                "Неоднозначные привязки родителя репозитория"
+            );
+            let entry = entries.first().map(|entry| (*entry).clone());
+            if let Some(entry) = &entry {
                 ensure!(
-                    listed["source"]["repo_root"] == repo,
-                    "Родительский workspace относится к другому репозиторию"
+                    !s(entry, "workspace").is_empty(),
+                    "Нет workspace в привязке репозитория"
                 );
+            }
+            // Reads have no mutation outcome to reconcile. Do them before
+            // claiming layout_pending, and replace only a missing parent in
+            // the namespace selected by this run.
+            let parent = if let Some(entry) = &entry {
+                match c.herdr(
+                    &["worktree", "list", "--workspace", s(entry, "workspace")],
+                    r["herdr_session"].as_str(),
+                ) {
+                    Ok(listed) => {
+                        ensure!(
+                            listed["source"]["repo_root"] == repo,
+                            "Родительский workspace относится к другому репозиторию"
+                        );
+                        Some(s(entry, "workspace").to_owned())
+                    }
+                    Err(e) if error_code(&e) == "workspace_not_found" => None,
+                    Err(e) => return Err(e),
+                }
+            } else {
+                None
+            };
+            let parent = if let Some(parent) = parent {
                 parent
             } else {
+                r["layout_intent"] =
+                    json!({"kind":"repository_workspace","repository":repo,"path":first["path"]});
+                p["layout_pending"] = json!(id);
+                c.update(&mut r, &mut t)?;
+                c.save(&c.path("projects", s(&p, "id"))?, &p)?;
                 let created = c.herdr(
                     &[
                         "workspace",
@@ -1038,15 +1119,23 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
                 if p["repository_workspaces"].is_null() {
                     p["repository_workspaces"] = json!([]);
                 }
-                p["repository_workspaces"]
+                let bindings = p["repository_workspaces"]
                     .as_array_mut()
-                    .ok_or_else(|| anyhow!("Некорректные привязки репозиториев"))?
-                    .push(json!({"repository":repo,"namespace":ns,"workspace":parent}));
+                    .ok_or_else(|| anyhow!("Некорректные привязки репозиториев"))?;
+                bindings.retain(|b| !(b["repository"] == repo && b["namespace"] == ns));
+                bindings.push(json!({"repository":repo,"namespace":ns,"workspace":parent}));
+                if let Some(entry) = &entry {
+                    r["workspace_recovery"] = json!({"old":entry["workspace"],"new":parent,"reason":"workspace_not_found","repository":repo});
+                }
+                r["repository_parent_created"] =
+                    json!({"workspace":parent,"repository":repo,"namespace":ns});
+                c.update(&mut r, &mut t)?;
+                p.as_object_mut().unwrap().remove("layout_pending");
                 c.save(&c.path("projects", s(&p, "id"))?, &p)?;
+                r.as_object_mut().unwrap().remove("layout_intent");
+                c.update(&mut r, &mut t)?;
                 parent
             };
-            r["layout_intent"] = json!({"kind":"worktree_open","repository":repo,"path":first["path"],"parent_workspace":parent});
-            c.update(&mut r, &mut t)?;
             let listed = c.herdr(
                 &["worktree", "list", "--workspace", &parent],
                 r["herdr_session"].as_str(),
@@ -1078,6 +1167,10 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
                     "Worktree уже открыт в неподтверждённом workspace"
                 );
             }
+            r["layout_intent"] = json!({"kind":"worktree_open","repository":repo,"path":first["path"],"parent_workspace":parent});
+            p["layout_pending"] = json!(id);
+            c.update(&mut r, &mut t)?;
+            c.save(&c.path("projects", s(&p, "id"))?, &p)?;
             let opened = c.herdr(
                 &[
                     "worktree",

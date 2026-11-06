@@ -23,7 +23,7 @@ pub fn add_worktree(
     path: &Path,
     branch: &str,
     lease: &external::ProcessLease,
-) -> Result<bool> {
+) -> Result<(bool, String)> {
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(repo)
@@ -31,8 +31,8 @@ pub fn add_worktree(
         .arg(path)
         .arg("HEAD");
     lease.inherit(&mut cmd);
-    let (ok, _, _) = external::output(&mut cmd, Duration::from_secs(60))?;
-    Ok(ok)
+    let (ok, _, stderr) = external::output(&mut cmd, Duration::from_secs(60))?;
+    Ok((ok, stderr.trim().to_owned()))
 }
 pub fn main_branch(repo: &Path, saved: Option<&str>) -> Result<String> {
     if let Some(saved) = saved {

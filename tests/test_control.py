@@ -61,6 +61,9 @@ elif a[:2] == ["worktree", "open"]:
          "workspace": {"workspace_id": "w7", "worktree": {"checkout_path": path}},
          "tab": {"tab_id": "w7:t1"}, "root_pane": {"pane_id": "w7:p1", "terminal_id": "term_original"}}
 elif a[:2] == ["worktree", "list"]:
+    if "--workspace" in a and a[a.index("--workspace") + 1] == "wJ":
+        print(json.dumps({"error": {"code": os.environ.get("FAKE_PARENT_ERROR", "workspace_not_found"), "message": "workspace wJ not found"}, "id": "cli:worktree:list"}), file=sys.stderr)
+        sys.exit(1)
     repo = Path(os.environ["FAKE_LOG"] + ".repository").read_text()
     worktrees = []
     if os.environ.get("FAKE_NO_LAYOUT"):
@@ -695,7 +698,7 @@ class ControlTests(unittest.TestCase):
         results = self.cli("open", "task1", "task2", "task1")
         self.assertEqual([r["task"] for r in results], ["task1", "task2"])
         for result in results:
-            self.assertEqual(result["action"], "started")
+            self.assertEqual(result["action"], "preparing")
             self.assertEqual(result["run_status"], "launching")
             self.assertEqual(result["goal"], "Проверить")
             self.wait_run(result["run"])
@@ -756,7 +759,7 @@ class ControlTests(unittest.TestCase):
         self.env["FAKE_PANE_MISSING"] = "1"
         result = self.cli("open", "task1")[0]
         run = self.wait_run(result["run"])
-        self.assertEqual(result["action"], "restarted")
+        self.assertEqual(result["action"], "preparing")
         self.assertEqual(run["previous_run"], first["run"])
         self.assertEqual(result["previous_checkpoint"], str(directory / "checkpoint.md"))
         self.assertEqual(Path(result["plan"]).read_text(), "Восстановительный план")
@@ -816,7 +819,7 @@ class ControlTests(unittest.TestCase):
         self.create("good")
         result = self.cli("open", "missing", "good", ok=False)
         self.assertEqual(result[0]["action"], "error")
-        self.assertEqual(result[1]["action"], "started")
+        self.assertEqual(result[1]["action"], "preparing")
         self.wait_run(result[1]["run"])
 
     def test_open_rejects_wrong_namespace_and_unrelated_executor(self):
@@ -842,7 +845,7 @@ class ControlTests(unittest.TestCase):
             stdout, stderr = process.communicate(timeout=10)
             self.assertEqual(process.returncode, 0, stdout + stderr)
             results.append(json.loads(stdout)[0])
-        self.assertEqual({r["action"] for r in results}, {"started", "preparing"})
+        self.assertEqual({r["action"] for r in results}, {"preparing"})
         self.assertEqual(results[0]["run"], results[1]["run"])
         self.wait_run(results[0]["run"])
         self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 1)
@@ -1010,7 +1013,7 @@ class ControlTests(unittest.TestCase):
         self.assertIn('launcher', diagnosed['error'])
         self.assertEqual(json.loads(path.read_text())['status'], 'launch_failed')
         retry = self.cli('open', 'task1')[0]
-        self.assertEqual(retry['action'], 'restarted')
+        self.assertEqual(retry['action'], 'preparing')
         self.wait_launcher(retry['run'])
         self.assertEqual(sum(c[:2] == ['workspace', 'create'] for c in self.calls()), 1)
         self.assertEqual(sum(c[:2] == ['agent', 'start'] for c in self.calls()), 1)
@@ -1064,7 +1067,7 @@ class ControlTests(unittest.TestCase):
         wrapper = self.root / 'bin/git'
         wrapper.write_text('#!/usr/bin/env python3\nimport os,sys\n'
             + 'if "worktree" in sys.argv and "add" in sys.argv and os.environ.get("GIT_SIGNAL"): os.kill(os.getpid(), 15)\n'
-            + 'if "worktree" in sys.argv and "add" in sys.argv and os.environ.get("GIT_FAIL"): sys.exit(1)\n'
+            + 'if "worktree" in sys.argv and "add" in sys.argv and os.environ.get("GIT_FAIL"): print("fatal: fixture disk full", file=sys.stderr); sys.exit(1)\n'
             + f'os.execv({git!r}, [{git!r}, *sys.argv[1:]])\n')
         wrapper.chmod(0o755)
         self.env['GIT_FAIL'] = '1'
@@ -1078,6 +1081,7 @@ class ControlTests(unittest.TestCase):
             self.assertEqual(len(self.cli('show', 'tasks', 'task1')['runs']), 1)
             return
         self.assertTrue(failed['worktree_intent']['command_finished'])
+        self.assertIn('fatal: fixture disk full', failed['error'])
         self.env.pop('GIT_FAIL')
         retry = self.cli('open', 'task1')[0]
         self.assertEqual(self.wait_launcher(retry['run'])['status'], 'running')
@@ -1660,6 +1664,173 @@ class ControlTests(unittest.TestCase):
         self.git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init")
         return repo
 
+    def stale_repository_binding(self):
+        repo = self.recovery_repo()
+        self.create("seed", "--code", "--repo", str(repo))
+        self.start("seed")
+        file = self.root / "bindings/projects/lab.json"
+        binding = json.loads(file.read_text())
+        binding["repository_workspaces"][0]["workspace"] = "wJ"
+        file.write_text(json.dumps(binding))
+        self.create("task1", "--code", "--repo", str(repo))
+        return repo
+
+    def test_open_retries_original_stale_parent_failure_preserving_checkout(self):
+        self.stale_repository_binding()
+        self.env["FAKE_PARENT_ERROR"] = "permission_denied"
+        result = self.cli("open", "task1")[0]
+        run = self.wait_run(result["run"], "launch_failed")
+        self.wait_launcher(run["id"])
+        directory = self.root / "runs" / run["id"]
+        # Replay the legacy journal and the exact parent-list failure.
+        run["error"] = json.dumps({"error": {"code": "workspace_not_found"}, "id": "cli:worktree:list"})
+        run["layout_intent"] = dict(kind="repository_workspace", repository=run["repositories"][0], path=run["worktrees"][0]["path"])
+        (directory / "state.json").write_text(json.dumps(run))
+        binding_file = self.root / "bindings/projects/lab.json"
+        binding = json.loads(binding_file.read_text())
+        binding["layout_pending"] = run["id"]
+        binding_file.write_text(json.dumps(binding))
+        (directory / "plan.md").write_text("Проверить восстановление")
+        (directory / "checkpoint.md").write_text("Сохранённый результат")
+        checkout = Path(run["worktrees"][0]["path"])
+        (checkout / "unsaved.txt").write_text("Работа пользователя")
+        self.env.pop("FAKE_PARENT_ERROR")
+        retry = self.cli("open", "task1")[0]
+        restored = self.wait_run(retry["run"])
+        self.assertEqual(restored["worktrees"], run["worktrees"])
+        self.assertEqual(restored["previous_run"], run["id"])
+        self.assertEqual((checkout / "unsaved.txt").read_text(), "Работа пользователя")
+        self.assertEqual(Path(retry["plan"]).read_text(), "Проверить восстановление")
+        self.assertEqual((directory / "checkpoint.md").read_text(), "Сохранённый результат")
+        self.assertIn("layout_probe_recovery", self.cli("run", run["id"]))
+        self.assertEqual(sum(c[:2] == ["workspace", "create"] for c in self.calls()), 2)
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 2)
+
+    def test_repository_parent_read_errors_preserve_binding_and_allow_safe_retry(self):
+        self.stale_repository_binding()
+        binding_file = self.root / "bindings/projects/lab.json"
+        before = json.loads(binding_file.read_text())
+        for error in ("permission_denied", "timeout", "server_error"):
+            with self.subTest(error=error):
+                self.env["FAKE_PARENT_ERROR"] = error
+                result = self.cli("open", "task1")[0]
+                self.assertEqual(result["action"], "preparing")
+                self.assertEqual(result["run_status"], "launching")
+                run = self.wait_run(result["run"], "launch_failed")
+                self.wait_launcher(run["id"])
+                self.assertIn(error, self.cli("run", run["id"], "--compact")["error"])
+                self.assertNotIn("layout_intent", run)
+                self.assertEqual(json.loads(binding_file.read_text()), before)
+                self.assertEqual(sum(c[:2] == ["workspace", "create"] for c in self.calls()), 1)
+        self.env.pop("FAKE_PARENT_ERROR")
+        restored = self.wait_run(self.cli("open", "task1")[0]["run"])
+        self.assertEqual(restored["worktrees"], run["worktrees"])
+
+    def test_ambiguous_repository_bindings_do_not_create_another_workspace(self):
+        self.stale_repository_binding()
+        file = self.root / "bindings/projects/lab.json"
+        binding = json.loads(file.read_text())
+        binding["repository_workspaces"].append(dict(binding["repository_workspaces"][0], workspace="another"))
+        file.write_text(json.dumps(binding))
+        opened = self.cli("open", "task1")[0]
+        run = self.wait_run(opened["run"], "launch_failed")
+        self.wait_launcher(run["id"])
+        self.assertIn("Неоднозначные", run["error"])
+        self.assertNotIn("layout_intent", run)
+        self.assertEqual(sum(c[:2] == ["workspace", "create"] for c in self.calls()), 1)
+        self.assertEqual(json.loads(file.read_text()), binding)
+
+    def test_missing_repository_parent_create_timeout_is_not_repeated(self):
+        self.stale_repository_binding()
+        self.env["FAKE_CREATE_FAIL"] = "1"
+        opened = self.cli("open", "task1")[0]
+        run = self.wait_run(opened["run"], "launch_failed")
+        self.wait_launcher(run["id"])
+        self.assertEqual(run["layout_intent"]["kind"], "repository_workspace")
+        before = self.calls()
+        self.cli("open", "task1", ok=False)
+        self.assertEqual(sum(c[:2] == ["workspace", "create"] for c in self.calls()),
+                         sum(c[:2] == ["workspace", "create"] for c in before))
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 1)
+        binding = json.loads((self.root / "bindings/projects/lab.json").read_text())
+        self.assertEqual(binding["repository_workspaces"][0]["workspace"], "wJ")
+        self.assertEqual(binding["layout_pending"], run["id"])
+
+    def test_pending_worktree_open_with_deleted_parent_checks_child_by_repository(self):
+        repo = self.recovery_repo()
+        self.create("task1", "--code", "--repo", str(repo))
+        self.env["FAKE_WORKTREE_FAIL"] = "1"
+        opened = self.cli("open", "task1")[0]
+        run = self.wait_run(opened["run"], "launch_failed")
+        self.wait_launcher(run["id"])
+        directory = self.root / "runs" / run["id"]
+        run["layout_intent"]["parent_workspace"] = "wJ"
+        (directory / "state.json").write_text(json.dumps(run))
+        binding_file = self.root / "bindings/projects/lab.json"
+        binding = json.loads(binding_file.read_text())
+        binding["repository_workspaces"][0]["workspace"] = "wJ"
+        binding_file.write_text(json.dumps(binding))
+        self.env.pop("FAKE_WORKTREE_FAIL")
+        self.env["FAKE_NO_LAYOUT"] = "1"
+        # A child still open elsewhere must not receive a duplicate executor.
+        fake = self.root / "bin/herdr"
+        original = fake.read_text()
+        fake.write_text(original.replace('"open_workspace_id": None}', '"open_workspace_id": "foreign"}'))
+        self.cli("open", "task1", ok=False)
+        self.assertEqual(sum(c[:2] == ["worktree", "open"] for c in self.calls()), 1)
+        fake.write_text(original)
+        restored = self.wait_run(self.cli("open", "task1")[0]["run"])
+        self.assertEqual(restored["worktrees"], run["worktrees"])
+        self.assertTrue(any(c[:2] == ["worktree", "list"] and "--cwd" in c for c in self.calls()))
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 1)
+
+    def test_repository_parent_in_changed_namespace_is_not_replaced(self):
+        self.stale_repository_binding()
+        self.env["FAKE_PARENT_ERROR"] = "permission_denied"
+        result = self.cli("open", "task1")[0]
+        self.wait_run(result["run"], "launch_failed")
+        self.wait_launcher(result["run"])
+        binding = (self.root / "bindings/projects/lab.json").read_bytes()
+        self.env.pop("FAKE_PARENT_ERROR")
+        self.env["FAKE_SOCKET_SUFFIX"] = ".another-server"
+        self.assertEqual(self.cli("open", "task1", ok=False)[0]["action"], "error")
+        self.assertEqual((self.root / "bindings/projects/lab.json").read_bytes(), binding)
+        self.assertEqual(sum(c[:2] == ["workspace", "create"] for c in self.calls()), 1)
+
+    def test_no_code_stale_workspace_ignores_only_finished_cleanup(self):
+        self.create("old")
+        old = self.start("old")
+        self.wait_launcher(old["id"])
+        file = self.root / "runs" / old["id"] / "state.json"
+        old.update(workspace="stale", worker_pid=None)
+        old.pop("launcher_lease")
+        old.pop("worker_identity")
+        self.bind_stale()
+        self.create("task1")
+        for status, cleanup in (("running", "closed"), ("done", "failed")):
+            old.update(status=status, cleanup={"status": cleanup})
+            file.write_text(json.dumps(old))
+            self.cli("open", "task1", ok=False)
+        old.update(status="done", cleanup={"status": "closed"})
+        file.write_text(json.dumps(old))
+        self.assertEqual(self.cli("run", old["id"])["launcher_status"], "unknown")
+        restored = self.wait_run(self.cli("open", "task1")[0]["run"])
+        self.assertEqual(restored["workspace_recovery"]["old"], "stale")
+        self.assertEqual(sum(c[:2] == ["workspace", "create"] for c in self.calls()), 2)
+
+    def test_open_repairs_deleted_repository_parent(self):
+        self.stale_repository_binding()
+        result = self.cli("open", "task1")[0]
+        run = self.wait_run(result["run"])
+        self.assertEqual(run["repository_workspace"]["parent"], "w7")
+        binding = json.loads((self.root / "bindings/projects/lab.json").read_text())
+        self.assertEqual(len(binding["repository_workspaces"]), 1)
+        self.assertEqual(binding["repository_workspaces"][0]["workspace"], "w7")
+        self.env.update(FAKE_LIVE="1", FAKE_AUTO_ASSIGNMENT="1")
+        self.assertEqual(self.cli("open", "task1")[0]["run"], run["id"])
+        self.assertEqual(sum(c[:2] == ["workspace", "create"] for c in self.calls()), 2)
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 2)
+
     def test_recover_layout_after_pending_cleanup_write_failure(self):
         repo = self.recovery_repo()
         self.create("task1", "--code", "--repo", str(repo))
@@ -1711,6 +1882,7 @@ class ControlTests(unittest.TestCase):
         replacement = prefix + '    if a[a.index("--workspace")+1] == "w7":\n        print(json.dumps({"error":{"code":"workspace_not_found"}}),file=sys.stderr);sys.exit(1)\n    print(json.dumps({"result":{"source":{"repo_root":os.environ["RECOVER_REPO"]},"worktrees":[{"path":os.environ["RECOVER_REPO"],"open_workspace_id":"w8"}]}}));sys.exit(0)\n'
         fake.write_text(fake.read_text().replace(prefix, replacement))
         self.env["RECOVER_REPO"] = str(repo)
+        self.env["FAKE_CREATE_FAIL"] = "1"  # Unknown parent creation still requires explicit recovery.
         opened = self.cli("open", "task2")[0]
         run = self.wait_run(opened["run"], "launch_failed")
         while self.cli("run", run["id"])["launcher_alive"]:
