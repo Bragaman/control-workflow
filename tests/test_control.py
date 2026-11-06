@@ -15,6 +15,18 @@ FAKE_HERDR = '''#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 from pathlib import Path
 a = sys.argv[1:]
+layout_id = os.environ.get('FAKE_WORKSPACE_ID', 'w7')
+layout_suffix = '' if layout_id == 'w7' else '-' + layout_id
+closed = Path(os.environ['FAKE_LOG'] + '.closed' + layout_suffix)
+workspace_closed = Path(os.environ['FAKE_LOG'] + '.workspace-closed' + layout_suffix)
+def layout_ids(value):
+    if isinstance(value, dict):
+        return {k: layout_ids(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [layout_ids(v) for v in value]
+    if isinstance(value, str) and (value == 'w7' or value.startswith('w7:')):
+        return layout_id + value[2:]
+    return value
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(json.dumps(a) + "\\n")
 if a[:1] == ["--session"]:
@@ -34,7 +46,9 @@ if a[:2] == ["workspace", "create"]:
         print(json.dumps({"error": {"code": "timeout"}}), file=sys.stderr)
         sys.exit(1)
     Path(os.environ["FAKE_LOG"] + ".repository").write_text(a[a.index("--cwd") + 1])
-    r = {"workspace": {"workspace_id": "w7"}, "tab": {"tab_id": "w7:t1"}, "root_pane": {"pane_id": "w7:p1"}}
+    r = {"workspace": {"workspace_id": "w7"}, "tab": {"tab_id": "w7:t1"}, "root_pane": {"pane_id": "w7:p1", "terminal_id": "term_original"}}
+    if os.environ.get("FAKE_PARENT_WORKSPACE"):
+        r['workspace']['workspace_id'] = os.environ['FAKE_PARENT_WORKSPACE']
 elif a[:2] == ["workspace", "list"]:
     r = {"workspaces": []}
 elif a[:2] == ["worktree", "open"]:
@@ -45,7 +59,7 @@ elif a[:2] == ["worktree", "open"]:
     path = a[a.index("--path") + 1]
     r = {"already_open": False, "worktree": {"path": path},
          "workspace": {"workspace_id": "w7", "worktree": {"checkout_path": path}},
-         "tab": {"tab_id": "w7:t1"}, "root_pane": {"pane_id": "w7:p1"}}
+         "tab": {"tab_id": "w7:t1"}, "root_pane": {"pane_id": "w7:p1", "terminal_id": "term_original"}}
 elif a[:2] == ["worktree", "list"]:
     repo = Path(os.environ["FAKE_LOG"] + ".repository").read_text()
     worktrees = []
@@ -56,6 +70,9 @@ elif a[:2] == ["worktree", "list"]:
         worktrees.extend({"path": line[9:], "open_workspace_id": None} for line in listing.splitlines() if line.startswith("worktree "))
     r = {"source": {"repo_root": repo}, "worktrees": worktrees}
 elif a[:2] == ["workspace", "get"]:
+    if workspace_closed.exists():
+        print(json.dumps({"error": {"code": "workspace_not_found"}}), file=sys.stderr)
+        sys.exit(1)
     if os.environ.get("FAKE_GET_ERROR"):
         print(json.dumps({"error": {"code": os.environ["FAKE_GET_ERROR"]}}), file=sys.stderr)
         sys.exit(1)
@@ -84,22 +101,36 @@ elif a[:2] == ["tab", "create"]:
         Path(os.environ["FAKE_LOG"] + ".created").touch()
         print(json.dumps({"error": {"code": "timeout"}}), file=sys.stderr)
         sys.exit(1)
-    r = {"tab": {"tab_id": "w7:t2"}, "root_pane": {"pane_id": "w7:p2"}}
+    r = {"tab": {"tab_id": "w7:t2"}, "root_pane": {"pane_id": "w7:p2", "terminal_id": "term_tab"}}
 elif a[:2] == ["tab", "get"]:
-    if Path(os.environ["FAKE_LOG"] + ".closed").exists():
+    if closed.exists():
         print(json.dumps({"error": {"code": "tab_not_found"}}), file=sys.stderr)
         sys.exit(1)
     r = {"tab": {"tab_id": a[2], "workspace_id": "w7"}}
 elif a[:2] == ["pane", "list"]:
-    r = {"panes": [{"pane_id": "w7:p1", "tab_id": "w7:t1", "agent": os.environ.get("FAKE_KIND", "codex")}]}
+    r = {"panes": [{"pane_id": "w7:p1", "tab_id": "w7:t1", "terminal_id": "term_original", "agent": os.environ.get("FAKE_KIND", "codex")}]}
+    if os.environ.get('FAKE_RECREATED_SHELL'):
+        r['panes'][0].update(agent=None, terminal_id='term_recreated_user_shell')
     if os.environ.get("FAKE_OTHER_AGENT"):
         r["panes"].append({"pane_id": "w7:p3", "tab_id": "w7:t1", "agent": os.environ.get("FAKE_KIND", "codex")})
+    if os.environ.get("FAKE_OTHER_SHELL"):
+        r["panes"].append({"pane_id": "w7:p3", "tab_id": os.environ["FAKE_OTHER_SHELL"], "agent": None})
+elif a[:2] == ["workspace", "close"]:
+    if os.environ.get("FAKE_WORKSPACE_CLOSE_FAIL"):
+        if os.environ["FAKE_WORKSPACE_CLOSE_FAIL"] == "after":
+            workspace_closed.touch()
+            closed.touch()
+        print("workspace close failed", file=sys.stderr)
+        sys.exit(1)
+    workspace_closed.touch()
+    closed.touch()
+    sys.exit(0)
 elif a[:2] == ["tab", "close"]:
     time.sleep(float(os.environ.get("FAKE_CLOSE_DELAY", "0")))
     if os.environ.get("FAKE_CLOSE_FAIL"):
         print("close failed", file=sys.stderr)
         sys.exit(1)
-    Path(os.environ["FAKE_LOG"] + ".closed").touch()
+    closed.touch()
     r = {}
 elif a[:2] == ["pane", "get"]:
     if a[2] == "missing":
@@ -133,6 +164,7 @@ elif a[:2] == ["agent", "start"]:
         sys.exit(0)
     r = {}
 elif a[:2] == ["pane", "process-info"]:
+    time.sleep(float(os.environ.get("FAKE_PROCESS_DELAY", "0")))
     counter = Path(os.environ["FAKE_LOG"] + ".process-count")
     count = int(counter.read_text()) + 1 if counter.exists() else 1
     counter.write_text(str(count))
@@ -166,7 +198,9 @@ elif a[:2] == ["pane", "read"]:
     sys.exit(0)
 else:
     r = {}
-print(json.dumps({"result": r}))
+if os.environ.get('FAKE_LAYOUT_NO_TERMINAL') and 'root_pane' in r:
+    r['root_pane'].pop('terminal_id', None)
+print(json.dumps({"result": layout_ids(r)}))
 '''
 
 
@@ -550,6 +584,60 @@ class ControlTests(unittest.TestCase):
         self.assertIn(str(artifact), snap["manifest"]["files"])
         artifact.write_text("changed")
         self.assertTrue(self.cli("review-show", "--run", r["id"])["attempts"][-1]["stale"])
+
+    def test_auto_review_handoff_waits_for_independent_verdict(self):
+        self.create('task1', '--agent-review-policy', 'auto')
+        r = self.start()
+        report = self.root / 'report.md'; report.write_text('Ready for review')
+        out = self.cli('finish', '--run', r['id'], '--report', str(report))
+        self.assertEqual(out['handoff']['action'], 'run_independent_review')
+        self.assertFalse(out['handoff']['ready_for_user'])
+        notices = self.cli('notifications')
+        self.assertFalse(any(n['title'].startswith('Готово к приёмке') for n in notices))
+        a = out['agent_review']
+        self.cli('review-claim', '--run', r['id'], '--id', a['id'], '--actor', 'fresh-reviewer')
+        verdict = self.root / 'verdict.json'
+        verdict.write_text(json.dumps(dict(version=a['version'], status='passed', conclusion='Checked',
+                                          findings=[], suggestions=[], evidence=['Independent check'], limitations=[])))
+        out = self.cli('review-conclude', '--run', r['id'], '--id', a['id'],
+                       '--actor', 'fresh-reviewer', '--result', str(verdict))
+        self.assertTrue(out['handoff']['ready_for_user'])
+        self.assertEqual(self.cli('show', 'tasks', 'task1')['status'], 'review')
+        self.assertEqual(sum(n['title'].startswith('Готово к приёмке') for n in self.cli('notifications')), 1)
+
+    def test_auto_review_failed_and_exhausted_cycles_never_report_ready(self):
+        self.create('task1', '--agent-review-policy', 'auto')
+        r = self.start()
+        report = self.root / 'report.md'; report.write_text('Review this')
+        for cycle in range(3):
+            a = self.cli('finish', '--run', r['id'], '--report', str(report))['agent_review']
+            self.cli('review-claim', '--run', r['id'], '--id', a['id'], '--actor', f'reviewer-{cycle}')
+            verdict = self.root / 'verdict.json'
+            verdict.write_text(json.dumps(dict(version=a['version'], status='changes_requested', conclusion='Fix',
+                                              findings=['Fix actual defect'], suggestions=[], evidence=['Reproduced'], limitations=[])))
+            out = self.cli('review-conclude', '--run', r['id'], '--id', a['id'],
+                           '--actor', f'reviewer-{cycle}', '--result', str(verdict))
+            self.assertFalse(out['handoff']['ready_for_user'])
+            self.assertEqual(out['handoff']['action'], 'fix_findings' if cycle < 2 else 'ask_user')
+            if cycle < 2:
+                self.cli('review-feedback', '--run', r['id'], '--id', a['id'])
+                self.cli('review-feedback', '--run', r['id'], '--id', a['id'], '--delivered')
+        self.cli('review-feedback', '--run', r['id'], '--id', a['id'], ok=False)
+        self.assertFalse(any(n['title'].startswith('Готово к приёмке') for n in self.cli('notifications')))
+
+    def test_auto_review_snapshot_failure_is_visible_without_ready_notice(self):
+        self.create('task1', '--agent-review-policy', 'auto')
+        r = self.start()
+        report = self.root / 'report.md'; report.write_text('Review this')
+        out = self.cli('finish', '--run', r['id'], '--report', str(report),
+                       '--artifact', str(self.root / 'missing'))
+        self.assertEqual(out['agent_review']['status'], 'failed')
+        self.assertEqual(out['handoff']['action'], 'report_review_failure')
+        self.assertFalse(out['handoff']['ready_for_user'])
+        self.assertTrue((self.root / 'runs' / r['id'] / 'agent-review-error.json').exists())
+        notices = self.cli('notifications')
+        self.assertTrue(any(n['title'].startswith('Сбой агентского ревью') for n in notices))
+        self.assertFalse(any(n['title'].startswith('Готово к приёмке') for n in notices))
 
     def test_execution_profiles_reach_codex_and_run(self):
         cases = (("research", "normal", "fixture-analysis", "medium"),
@@ -1018,7 +1106,10 @@ class ControlTests(unittest.TestCase):
             + '    deadline = time.monotonic() + 8\n'
             + '    while not gate.exists() and time.monotonic() < deadline: time.sleep(.01)\n'
             + f'code = 1 if gate and os.environ.get("GIT_FAIL") else subprocess.call([{git!r}, *sys.argv[1:]])\n'
-            + 'if gate: gate.with_suffix(".completed").write_text(str(code))\n'
+            + 'if gate:\n'
+            + '    pending = gate.with_suffix(".completed.tmp")\n'
+            + '    pending.write_text(str(code))\n'
+            + '    pending.replace(gate.with_suffix(".completed"))\n'
             + 'sys.exit(code)\n')
         wrapper.chmod(0o755)
         self.env['GIT_GATE'] = str(gate)
@@ -1303,6 +1394,21 @@ class ControlTests(unittest.TestCase):
         self.assertIn("agent start не отправлен", run["error"])
         self.assertFalse(any(c[:2] == ["agent", "start"] for c in self.calls()))
 
+    def test_shell_probe_timeout_preserves_unsent_assignment_evidence(self):
+        self.create()
+        config = Path(self.env['CONTROL_PLANE_CONFIG'])
+        settings = json.loads(config.read_text())
+        settings['agent_start_timeout_ms'] = 200
+        config.write_text(json.dumps(settings))
+        self.env.update(FAKE_SHELL_BUSY='1', FAKE_PROCESS_DELAY='1')
+        opened = self.cli('open', 'task1')[0]
+        run = self.wait_launcher(opened['run'])
+        self.assertEqual(run['status'], 'launch_failed')
+        self.assertNotIn('agent_start_intent', run)
+        self.assertFalse(any(c[:2] == ['agent', 'start'] for c in self.calls()))
+        self.assertIn('agent start не отправлен', run['error'])
+        self.assertIn('Превышено время ожидания внешней команды', run['error'])
+
     def test_busy_with_unrelated_live_agent_never_resubmits(self):
         self.create()
         self.env.update(FAKE_START_BUSY="1", FAKE_LIVE="1")
@@ -1569,6 +1675,11 @@ class ControlTests(unittest.TestCase):
         finally:
             directory.chmod(0o700)
         self.assertIsNotNone(run["pane"])
+        self.assertEqual(run['terminal_id'], 'term_original')
+        # Legacy layout recovery explicitly confirms the selected physical pane.
+        state_file = self.root / 'runs' / run['id'] / 'state.json'
+        state = json.loads(state_file.read_text()); state.pop('terminal_id')
+        state_file.write_text(json.dumps(state))
         # Confirm the same checkout and free pane, without creating anything.
         fake.write_text(fake.read_text().replace('elif a[:2] == ["worktree", "list"]:\n', 'elif a[:2] == ["worktree", "list"]:\n    print(json.dumps({"result":{"source":{"repo_root":os.environ["RECOVER_REPO"]},"worktrees":[{"path":os.environ["RECOVER_PATH"],"open_workspace_id":"w7"}]}}));sys.exit(0)\n'))
         self.env.update(RECOVER_REPO=str(repo), RECOVER_PATH=run["worktrees"][0]["path"])
@@ -1579,6 +1690,10 @@ class ControlTests(unittest.TestCase):
         fake.write_text(fake.read_text().replace('"agent": os.environ.get("FAKE_KIND", "codex")}', '"agent": os.environ.get("FAKE_KIND", "codex") or None}'))
         self.cli(*args)
         self.cli(*args)
+        self.assertEqual(self.cli('run', run['id'])['terminal_id'], 'term_original')
+        self.env['FAKE_RECREATED_SHELL'] = '1'
+        self.cli(*args, ok=False)
+        self.assertEqual(self.cli('run', run['id'])['terminal_id'], 'term_original')
         project = self.cli("show", "projects", "lab")
         self.assertNotIn("layout_pending", project)
         self.assertEqual(sum(c[:2] == ["worktree", "open"] for c in self.calls()), 1)
@@ -1822,6 +1937,7 @@ class ControlTests(unittest.TestCase):
         return result.stdout.strip()
 
     def code_review(self, remote=False, git_mode=None):
+        self.env['FAKE_PARENT_WORKSPACE'] = 'parent'
         repo = self.root / "repository"
         repo.mkdir()
         self.git(repo, "init", "-b", "main")
@@ -1845,6 +1961,195 @@ class ControlTests(unittest.TestCase):
         report.write_text("Код проверен и готов к приёмке")
         self.cli("finish", "--run", r["id"], "--report", str(report))
         return repo, wt, r
+
+    def test_complete_closes_only_owned_temporary_workspace(self):
+        repo, wt, r = self.code_review()
+        result = self.cli('complete', 'task1', '--commit-message', 'Update task content')
+        self.assertEqual(result['cleanup']['workspace_status'], 'closed')
+        self.assertEqual([c for c in self.calls() if c[:2] == ['workspace', 'close']],
+                         [['workspace', 'close', r['workspace']]])
+        self.assertTrue(wt.exists())  # Retained Git worktree is independent of Herdr layout.
+        self.assertTrue(repo.exists())
+        self.cli('complete', 'task1')
+        self.assertEqual(sum(c[:2] == ['workspace', 'close'] for c in self.calls()), 1)
+
+    def test_complete_workspace_close_unknown_outcome_is_retryable(self):
+        repo, wt, r = self.code_review(remote=True)
+        self.env['FAKE_WORKSPACE_CLOSE_FAIL'] = 'after'
+        result = self.cli('complete', 'task1', '--commit-message', 'Update task content', ok=False)
+        self.assertEqual(result['status'], 'done')
+        self.assertEqual(result['cleanup']['status'], 'failed')
+        self.assertFalse(wt.exists())
+        del self.env['FAKE_WORKSPACE_CLOSE_FAIL']
+        self.assertEqual(self.cli('complete', 'task1')['cleanup']['workspace_status'], 'closed')
+
+    def test_complete_preserves_foreign_shells_and_project_workspace(self):
+        repo, wt, r = self.code_review()
+        self.env['FAKE_OTHER_SHELL'] = r['tab']
+        self.cli('complete', 'task1', '--commit-message', 'Update task content', ok=False)
+        self.assertEqual(self.cli('show', 'tasks', 'task1')['status'], 'review')
+        self.env['FAKE_OTHER_SHELL'] = 'another-tab'
+        out = self.cli('complete', 'task1', '--commit-message', 'Update task content')
+        self.assertEqual(out['cleanup']['workspace_status'], 'preserved_foreign_panes')
+        self.assertFalse(any(c[:2] == ['workspace', 'close'] for c in self.calls()))
+
+    def test_complete_never_closes_project_binding_even_if_run_claims_it(self):
+        repo, wt, r = self.code_review()
+        self.cli('project-set', 'lab', '--workspace', r['workspace'])
+        out = self.cli('complete', 'task1', '--commit-message', 'Update task content')
+        self.assertEqual(out['cleanup']['workspace_status'], 'preserved_project')
+        self.assertFalse(any(c[:2] == ['workspace', 'close'] for c in self.calls()))
+
+    def test_complete_preserves_workspace_of_other_interrupted_run(self):
+        repo, wt, r = self.code_review()
+        other = self.root / 'runs/foreign/state.json'
+        other.parent.mkdir()
+        other.write_text(json.dumps(dict(id='foreign', task='another-task', status='interrupted',
+                                         workspace=r['workspace'], herdr_namespace=r['herdr_namespace'])))
+        self.cli('complete', 'task1', '--commit-message', 'Update task content', ok=False)
+        self.assertEqual(self.cli('show', 'tasks', 'task1')['status'], 'review')
+        self.assertFalse(any(c[:2] == ['workspace', 'close'] for c in self.calls()))
+
+    def test_repeat_complete_cannot_close_tab_reused_by_another_run(self):
+        r = self.review()
+        self.cli('complete', 'task1')
+        Path(str(self.log) + '.closed').unlink()
+        other = self.root / 'runs/foreign/state.json'
+        other.parent.mkdir()
+        other.write_text(json.dumps({**r, 'id': 'foreign', 'task': 'another-task', 'status': 'running'}))
+        before = sum(c[:2] == ['tab', 'close'] for c in self.calls())
+        self.assertEqual(self.cli('complete', 'task1')['status'], 'done')
+        self.assertEqual(sum(c[:2] == ['tab', 'close'] for c in self.calls()), before)
+
+    def test_completed_cleanup_never_closes_recreated_user_workspace(self):
+        repo, wt, r = self.code_review()
+        self.cli('complete', 'task1', '--commit-message', 'Update task content')
+        Path(str(self.log) + '.closed').unlink()
+        Path(str(self.log) + '.workspace-closed').unlink()
+        self.env['FAKE_RECREATED_SHELL'] = '1'
+        # The main checkout survives; Herdr can reuse IDs after a restart.
+        before = self.calls(raw=True)
+        self.assertEqual(self.cli('complete', 'task1')['status'], 'done')
+        self.assertEqual(sum(c[:2] == ['workspace', 'close'] for c in self.calls()), 1)
+        self.assertEqual(self.calls(raw=True), before)
+        (wt / 'new-user-work.txt').write_text('unrelated user work')
+        self.assertEqual(self.cli('complete', 'task1')['status'], 'done')
+        self.assertEqual(self.calls(raw=True), before)
+        self.assertEqual((wt / 'new-user-work.txt').read_text(), 'unrelated user work')
+
+    def test_pending_cleanup_recovers_after_close_before_checkpoint(self):
+        r = self.review()
+        self.cli('complete', 'task1')
+        state_file = self.root / 'runs' / r['id'] / 'state.json'
+        state = json.loads(state_file.read_text())
+        state['cleanup']['status'] = 'pending'
+        state_file.write_text(json.dumps(state))
+        out = self.cli('complete', 'task1')
+        self.assertEqual(out['cleanup']['status'], 'closed')
+        self.assertEqual(self.cli('run', r['id'])['cleanup']['status'], 'closed')
+        self.assertEqual(sum(c[:2] == ['tab', 'close'] for c in self.calls()), 1)
+
+    def test_failed_cleanup_preserves_recreated_user_terminal(self):
+        repo, wt, r = self.code_review()
+        self.env['FAKE_WORKSPACE_CLOSE_FAIL'] = 'before'
+        self.cli('complete', 'task1', '--commit-message', 'Update task content', ok=False)
+        self.env.pop('FAKE_WORKSPACE_CLOSE_FAIL')
+        self.env['FAKE_RECREATED_SHELL'] = '1'
+        before = sum(c[:2] == ['workspace', 'close'] for c in self.calls())
+        self.cli('complete', 'task1', ok=False)
+        self.assertEqual(sum(c[:2] == ['workspace', 'close'] for c in self.calls()), before)
+
+    def test_first_complete_preserves_recreated_user_terminal(self):
+        repo, wt, r = self.code_review(remote=True)
+        before = self.git(wt, 'status', '--porcelain')
+        self.env['FAKE_RECREATED_SHELL'] = '1'
+        self.cli('complete', 'task1', '--commit-message', 'Update task content', ok=False)
+        self.assertEqual(self.git(wt, 'status', '--porcelain'), before)
+        self.assertFalse(any(c[:2] in (['workspace', 'close'], ['tab', 'close']) for c in self.calls()))
+        self.assertNotIn('git_completion', self.cli('run', r['id']))
+
+    def test_legacy_first_complete_preserves_unknown_user_terminal(self):
+        repo, wt, r = self.code_review()
+        path = self.root / 'runs' / r['id'] / 'state.json'
+        state = json.loads(path.read_text()); state.pop('terminal_id', None)
+        path.write_text(json.dumps(state))
+        self.cli('complete', 'task1', '--commit-message', 'Update task content', ok=False)
+        self.assertFalse(any(c[:2] in (['workspace', 'close'], ['tab', 'close']) for c in self.calls()))
+        self.assertNotIn('git_completion', self.cli('run', r['id']))
+
+    def test_layout_terminal_identity_is_saved_before_agent_start(self):
+        self.create()
+        gate = self.root / 'start-gate'
+        self.env['FAKE_START_GATE'] = str(gate)
+        opened = self.cli('start', 'task1')
+        try:
+            deadline = time.monotonic() + 3
+            while not gate.with_suffix('.entered').exists():
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.01)
+            state = json.loads((self.root / 'runs' / opened['run'] / 'state.json').read_text())
+            self.assertEqual(state['terminal_id'], 'term_original')
+            self.assertNotIn('agent_start_completed', state)
+        finally:
+            gate.touch()
+        self.wait_run(opened['run'])
+        self.env.pop('FAKE_START_GATE')
+        self.create('second')
+        second = self.start('second')
+        self.assertEqual(second['terminal_id'], 'term_tab')
+
+    def test_layout_without_terminal_identity_does_not_start_agent(self):
+        self.create()
+        self.env['FAKE_LAYOUT_NO_TERMINAL'] = '1'
+        opened = self.cli('open', 'task1')[0]
+        run = self.wait_launcher(opened['run'])
+        self.assertEqual(run['status'], 'launch_failed')
+        self.assertNotIn('agent_start_intent', run)
+        self.assertFalse(any(c[:2] == ['agent', 'start'] for c in self.calls()))
+
+    def test_complete_workspace_close_failure_before_mutation_can_retry(self):
+        repo, wt, r = self.code_review()
+        self.env['FAKE_WORKSPACE_CLOSE_FAIL'] = 'before'
+        out = self.cli('complete', 'task1', '--commit-message', 'Update task content', ok=False)
+        self.assertEqual(out['cleanup']['status'], 'failed')
+        self.assertFalse(any(c[:2] == ['tab', 'close'] for c in self.calls()))
+        del self.env['FAKE_WORKSPACE_CLOSE_FAIL']
+        self.assertEqual(self.cli('complete', 'task1')['cleanup']['workspace_status'], 'closed')
+
+    def assert_foreign_workspace_blocks_git(self, repo, wt):
+        before = self.git(wt, 'status', '--porcelain')
+        out = self.cli('complete', 'task1', '--commit-message', 'Update task content', ok=False)
+        self.assertIn('другие панели', out.get('error', ''))
+        self.assertTrue(wt.exists())
+        self.assertEqual(self.git(wt, 'status', '--porcelain'), before)
+        self.assertEqual(self.cli('show', 'tasks', 'task1')['status'], 'review')
+        run = self.cli('show', 'tasks', 'task1')['active_run']
+        saved = json.loads((self.root / 'runs' / run / 'state.json').read_text())
+        self.assertEqual(self.git(repo, 'ls-remote', 'origin',
+                                  'refs/heads/' + saved['worktrees'][0]['branch']), '')
+
+    def test_branch_git_cleanup_protects_foreign_pane_when_tab_missing(self):
+        repo, wt, r = self.code_review(remote=True)
+        Path(str(self.log) + '.closed').touch()
+        self.env['FAKE_OTHER_SHELL'] = 'another-tab'
+        self.assert_foreign_workspace_blocks_git(repo, wt)
+
+    def test_branch_git_cleanup_protects_foreign_pane_after_mode_change(self):
+        repo, wt, r = self.code_review(remote=True, git_mode='main')
+        self.cli('task-set', 'task1', '--git-mode', 'branch')
+        self.env['FAKE_OTHER_SHELL'] = 'another-tab'
+        self.assert_foreign_workspace_blocks_git(repo, wt)
+
+    def test_branch_git_cleanup_protects_foreign_pane_with_frozen_mode(self):
+        repo, wt, r = self.code_review(remote=True, git_mode='main')
+        self.cli('task-set', 'task1', '--git-mode', 'branch')
+        hook = self.root / 'origin.git/hooks/pre-receive'
+        hook.write_text('#!/bin/sh\nexit 1\n'); hook.chmod(0o755)
+        self.cli('complete', 'task1', '--commit-message', 'Update task content', ok=False)
+        hook.unlink()
+        self.cli('task-set', 'task1', '--git-mode', 'main')
+        self.env['FAKE_OTHER_SHELL'] = 'another-tab'
+        self.assert_foreign_workspace_blocks_git(repo, wt)
 
     def test_complete_requires_message_before_staging_and_can_retry(self):
         repo, wt, r = self.code_review()
@@ -1984,13 +2289,16 @@ class ControlTests(unittest.TestCase):
     def test_two_main_tasks_from_same_base_merge_and_push_both(self):
         repo, wt, r = self.code_review(remote=True, git_mode="main")
         self.create("task2", "--code", "--repo", str(repo), "--git-mode", "main")
+        self.env['FAKE_WORKSPACE_ID'] = 'w9'
         second = self.start("task2")
+        self.assertNotEqual(r['workspace'], second['workspace'])
         second_tree = Path(second["worktrees"][0]["path"])
         (second_tree / "second.txt").write_text("second task")
         self.cli("finish", "--run", second["id"], "--report", str(self.root / "report.md"))
-        # This fixture reuses w7; return the explicitly selected checkout.
+        self.env.pop('FAKE_WORKSPACE_ID')
         self.env['FAKE_WORKSPACE_PATH'] = str(wt)
         self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
+        self.env['FAKE_WORKSPACE_ID'] = 'w9'
         self.env['FAKE_WORKSPACE_PATH'] = str(second_tree)
         self.cli("complete", "task2", "--commit-message", "Add second task file")
         self.assertEqual((repo / "example.txt").read_text(), "task change")
@@ -2013,7 +2321,17 @@ class ControlTests(unittest.TestCase):
         state = json.loads(state_file.read_text())
         state["git_completion"]["status"] = "pending"
         state["git_completion"]["repositories"][0]["removed"] = False
+        # Model the actual boundary before Git checkpoint/acceptance/cleanup.
+        state['status'] = 'review'
+        state.pop('cleanup')
         state_file.write_text(json.dumps(state))
+        task_file = self.root / 'tasks/task1.json'
+        task = json.loads(task_file.read_text())
+        task['status'] = 'review'
+        task.pop('accepted')
+        task_file.write_text(json.dumps(task))
+        Path(str(self.log) + '.closed').unlink()
+        Path(str(self.log) + '.workspace-closed').unlink()
         self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
         self.assertTrue(self.cli("run", r["id"])["git_completion"]["repositories"][0]["removed"])
 

@@ -19,5 +19,6 @@ questions.json и result.md. Покажи в чате выводы, измене
 [control-complete](../control-complete/SKILL.md) и выполни его инструкции.
 До приёмки сохраняй файлы и worktree.
 
-Для поручения об агентском ревью и pending auto-задачи прочитай
+Исполнитель auto-задачи проводит ревью сразу после finish в текущем ходе.
+Для manual по поручению пользователя или восстановления pending auto прочитай
 [agent-review.md](../../docs/agent-review.md) и выполни его протокол.

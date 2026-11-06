@@ -675,13 +675,25 @@ fn worker(c: &Context, name: &str, a: &Value) -> Result<Value> {
                     }
                 };
             }
-            notification(
-                c,
-                &format!("Готово к приёмке: {}", s(&t, "title")),
-                &result_file.to_string_lossy(),
-                Some(&r),
-            )?;
             let mut result = json!({"task":t["id"],"status":"review"});
+            if t["agent_review_policy"] == "auto" {
+                result["handoff"] = review::finish_handoff(c, &r, &agent_review)?;
+                if agent_review["status"] == "failed" {
+                    notification(
+                        c,
+                        &format!("Сбой агентского ревью: {}", s(&t, "title")),
+                        &agent_review.to_string(),
+                        Some(&r),
+                    )?;
+                }
+            } else {
+                notification(
+                    c,
+                    &format!("Готово к приёмке: {}", s(&t, "title")),
+                    &result_file.to_string_lossy(),
+                    Some(&r),
+                )?;
+            }
             result["agent_review"] = agent_review;
             Ok(result)
         }

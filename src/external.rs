@@ -391,6 +391,7 @@ impl Context {
                         | ["pane", "run"]
                         | ["tab", "rename"]
                         | ["tab", "close"]
+                        | ["workspace", "close"]
                         | ["notification", "show"]
                 )
             )

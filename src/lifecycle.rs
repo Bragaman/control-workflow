@@ -14,6 +14,25 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn terminal_identity(pane: &Value) -> Result<&str> {
+    pane["terminal_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| anyhow!("Herdr не подтвердил terminal_id; нужна сверка"))
+}
+
+fn require_terminal(r: &Value, pane: &Value) -> Result<()> {
+    ensure!(
+        !s(r, "terminal_id").is_empty(),
+        "При создании layout не сохранён terminal_id; нужна явная сверка"
+    );
+    ensure!(
+        terminal_identity(pane)? == s(r, "terminal_id"),
+        "Терминал запуска сменился; чужая работа сохранена"
+    );
+    Ok(())
+}
+
 pub fn workspace_binding(
     c: &Context,
     p: &mut Value,
@@ -125,11 +144,15 @@ fn wait_new_shell(c: &Context, r: &Value) -> Result<()> {
             !remaining.is_zero(),
             "Не дождались готовности нового shell; agent start не отправлен"
         );
-        let v = c.herdr_timeout(
-            &["pane", "process-info", "--pane", s(r, "pane")],
-            r["herdr_session"].as_str(),
-            remaining,
-        )?;
+        let v = c
+            .herdr_timeout(
+                &["pane", "process-info", "--pane", s(r, "pane")],
+                r["herdr_session"].as_str(),
+                remaining,
+            )
+            .map_err(|e| {
+                anyhow!("Не дождались готовности нового shell; agent start не отправлен: {e}")
+            })?;
         let info = &v["process_info"];
         ensure!(
             info["pane_id"] == r["pane"],
@@ -328,6 +351,10 @@ pub fn recover_layout(c: &Context, r: &mut Value, t: &mut Value, a: &Value) -> R
         r["workspace"] = json!(workspace);
         r["pane"] = panes[0]["pane_id"].clone();
         r["tab"] = panes[0]["tab_id"].clone();
+        if !r["terminal_id"].is_null() {
+            require_terminal(r, &panes[0])?;
+        }
+        r["terminal_id"] = json!(terminal_identity(&panes[0])?);
         ensure!(!s(r, "tab").is_empty(), "Herdr не подтвердил tab");
         r["repository_workspace"] = json!({"repository":intent["repository"],"parent":intent["parent_workspace"],"path":intent["path"],"namespace":ns});
     }
@@ -1079,7 +1106,9 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
                     previous.as_ref().is_some_and(|prev| prev["workspace"]
                         == opened["workspace"]["workspace_id"]
                         && prev["pane"] == opened["root_pane"]["pane_id"]
-                        && prev["herdr_namespace"] == ns),
+                        && prev["herdr_namespace"] == ns
+                        && !s(prev, "terminal_id").is_empty()
+                        && prev["terminal_id"] == opened["root_pane"]["terminal_id"]),
                     "Открытый workspace не подтверждён прежним запуском"
                 );
                 let panes = c.herdr(
@@ -1103,6 +1132,7 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
             r["workspace"] = opened["workspace"]["workspace_id"].clone();
             r["tab"] = opened["tab"]["tab_id"].clone();
             r["pane"] = opened["root_pane"]["pane_id"].clone();
+            r["terminal_id"] = json!(terminal_identity(&opened["root_pane"])?);
             ensure!(
                 ["workspace", "tab", "pane"]
                     .iter()
@@ -1161,6 +1191,7 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
             };
             r["tab"] = layout["tab"]["tab_id"].clone();
             r["pane"] = layout["root_pane"]["pane_id"].clone();
+            r["terminal_id"] = json!(terminal_identity(&layout["root_pane"])?);
             ensure!(
                 ["workspace", "tab", "pane"]
                     .iter()
@@ -1296,7 +1327,7 @@ pub fn assignment_text(c: &Context, r: &Value, t: &Value) -> Result<String> {
         "нет".into()
     };
     Ok(format!(
-        "# Задача {}: {}\n\nЦель: {}\n\nКритерии готовности: {}\n\nСостояние панели: {}\nРесурсы программы: {}\nЗапуск: {}\nАдаптер: {}\nПрофиль: {}; выбор: {}.\nМодель: {}; reasoning effort: {}.\nПроект: {}\nРабочие деревья: {}\nЗавершение Git: {}; контракт: {}\nПриёмка: {}.\n\nДо работы прочитай контракт исполнителя: {}.\nПравила планирования: {}.\nПрочитай {}, если он есть; иначе {}.\nПредыдущий запуск: {}.\nАртефакты и checkpoint текущего запуска сохраняй в {}.\n\nКоманда панели (из любого cwd): {}\nВ progress/block/finish/memory-add указывай --run {}.\nДля памяти: memory-list --project {} --query 'тема' --limit 10; читай только нужные записи.\nСамостоятельный finish оставляет review; complete требует поручения пользователя.\n",
+        "# Задача {}: {}\n\nЦель: {}\n\nКритерии готовности: {}\n\nСостояние панели: {}\nРесурсы программы: {}\nЗапуск: {}\nАдаптер: {}\nПрофиль: {}; выбор: {}.\nМодель: {}; reasoning effort: {}.\nПроект: {}\nРабочие деревья: {}\nЗавершение Git: {}; контракт: {}\nПриёмка: {}.\nПолитика агентского ревью: {}.\n\nДо работы прочитай контракт исполнителя: {}.\nПравила планирования: {}.\nПрочитай {}, если он есть; иначе {}.\nПредыдущий запуск: {}.\nАртефакты и checkpoint текущего запуска сохраняй в {}.\n\nКоманда панели (из любого cwd): {}\nВ progress/block/finish/memory-add указывай --run {}.\nДля памяти: memory-list --project {} --query 'тема' --limit 10; читай только нужные записи.\nСамостоятельный finish оставляет review; complete требует поручения пользователя. При auto сразу после finish выполни handoff по docs/agent-review.md: независимый subagent до итогового ответа, затем исправление замечаний в том же запуске.\n",
         s(t, "id"),
         s(t, "title"),
         s(t, "goal"),
@@ -1314,6 +1345,7 @@ pub fn assignment_text(c: &Context, r: &Value, t: &Value) -> Result<String> {
         s(t, "git_mode"),
         c.program.join("docs/git-policy.md").display(),
         s(t, "reviewer"),
+        t["agent_review_policy"].as_str().unwrap_or("manual"),
         c.program.join("docs/worker.md").display(),
         c.program.join("docs/planning.md").display(),
         dir.join("plan.md").display(),
@@ -1425,8 +1457,129 @@ fn saved_tab(c: &Context, r: &Value) -> Result<Option<Value>> {
     c.check_namespace(r)?;
     match c.herdr(&["tab", "get", s(r, "tab")], r["herdr_session"].as_str()) {
         Ok(v) => Ok(Some(v["tab"].clone())),
-        Err(e) if error_code(&e) == "tab_not_found" => Ok(None),
+        Err(e) if ["tab_not_found", "workspace_not_found"].contains(&error_code(&e).as_str()) => {
+            Ok(None)
+        }
         Err(e) => Err(e),
+    }
+}
+
+// Only linked worktree workspaces belong to a run. Ordinary project and
+// repository-parent workspaces outlive tasks, even if a run claims their ID.
+fn workspace_cleanup_scope(c: &Context, r: &Value) -> Result<&'static str> {
+    let owned = &r["repository_workspace"];
+    if owned.is_null() {
+        return Ok("preserved_project");
+    }
+    ensure!(
+        !r["herdr_namespace"].is_null()
+            && owned["namespace"] == r["herdr_namespace"]
+            && owned["path"].is_string()
+            && owned["path"] != owned["repository"]
+            && owned["path"] == r["worktrees"][0]["path"]
+            && owned["repository"] == r["worktrees"][0]["repository"],
+        "Не подтверждена принадлежность временного workspace запуску"
+    );
+    for project in c.rows("projects")? {
+        if project["workspace"] == r["workspace"]
+            && (project["workspace_namespace"].is_null()
+                || project["workspace_namespace"] == r["herdr_namespace"])
+        {
+            return Ok("preserved_project");
+        }
+        if project["repository_workspaces"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|p| p["workspace"] == r["workspace"] && p["namespace"] == r["herdr_namespace"])
+        {
+            return Ok("preserved_project");
+        }
+    }
+    ensure!(
+        owned["parent"] != r["workspace"],
+        "Вместо временного workspace сохранён родительский"
+    );
+    for run in c.runs()? {
+        if run["id"] != r["id"]
+            && run["workspace"] == r["workspace"]
+            && run["herdr_namespace"] == r["herdr_namespace"]
+            && !["done", "cancelled"].contains(&s(&run, "status"))
+            && !(run["task"] == r["task"] && run["status"] == "interrupted")
+        {
+            return Ok("preserved_other_run");
+        }
+    }
+    Ok("owned")
+}
+
+fn workspace_panes(c: &Context, r: &Value) -> Result<Option<Vec<Value>>> {
+    c.check_namespace(r)?;
+    let live = match c.herdr(
+        &["workspace", "get", s(r, "workspace")],
+        r["herdr_session"].as_str(),
+    ) {
+        Ok(v) => v,
+        Err(e) if error_code(&e) == "workspace_not_found" => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    ensure!(
+        live["workspace"]["workspace_id"] == r["workspace"]
+            && live["workspace"]["worktree"]["checkout_path"] == r["repository_workspace"]["path"],
+        "Workspace больше не относится к worktree запуска"
+    );
+    let listed = c.herdr(
+        &["pane", "list", "--workspace", s(r, "workspace")],
+        r["herdr_session"].as_str(),
+    )?;
+    let panes = listed["panes"]
+        .as_array()
+        .ok_or_else(|| anyhow!("Некорректный список panes"))?;
+    ensure!(
+        !s(r, "terminal_id").is_empty(),
+        "При создании layout не сохранён terminal_id; нужна явная сверка"
+    );
+    for pane in panes.iter().filter(|p| p["pane_id"] == r["pane"]) {
+        require_terminal(r, pane)?;
+    }
+    Ok(Some(panes.clone()))
+}
+
+fn cleanup_workspace(c: &Context, r: &Value) -> Result<&'static str> {
+    let scope = workspace_cleanup_scope(c, r)?;
+    if scope != "owned" {
+        return Ok(scope);
+    }
+    let Some(panes) = workspace_panes(c, r)? else {
+        return Ok("closed");
+    };
+    if !panes
+        .iter()
+        .all(|p| p["pane_id"] == r["pane"] && p["tab_id"] == r["tab"])
+    {
+        return Ok("preserved_foreign_panes");
+    }
+    ensure!(
+        panes.is_empty()
+            || (r["cleanup"]["terminal_id"].is_string()
+                && panes
+                    .iter()
+                    .all(|p| p["terminal_id"] == r["cleanup"]["terminal_id"])),
+        "Терминал workspace сменился или его принадлежность неизвестна; нужна сверка"
+    );
+    // Close the workspace directly: closing its last tab can create a fresh
+    // default shell, whose ownership a retry could no longer establish.
+    c.herdr(
+        &["workspace", "close", s(r, "workspace")],
+        r["herdr_session"].as_str(),
+    )?;
+    match c.herdr(
+        &["workspace", "get", s(r, "workspace")],
+        r["herdr_session"].as_str(),
+    ) {
+        Err(e) if error_code(&e) == "workspace_not_found" => Ok("closed"),
+        Err(e) => Err(e),
+        Ok(_) => bail!("herdr не подтвердил закрытие workspace"),
     }
 }
 fn request_file(c: &Context, r: &Value) -> Result<PathBuf> {
@@ -1565,7 +1718,22 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
             s(&t, "reviewer")
         );
     }
+    // A confirmed cleanup is final. Herdr can reuse IDs after a restart;
+    // probing or closing those IDs again could affect unrelated user work.
+    if t["status"] == status
+        && let Some(r) = &r
+        && r["status"] == status
+        && ["closed", "no_tab"].contains(&s(&r["cleanup"], "status"))
+    {
+        return Ok(
+            json!({"task":t["id"],"run":r["id"],"status":t["status"],"cleanup":r["cleanup"]}),
+        );
+    }
     let mut tab = None;
+    let terminal_id = r
+        .as_ref()
+        .map(|r| r["terminal_id"].clone())
+        .unwrap_or(Value::Null);
     if let Some(r) = &r {
         ensure!(
             r["status"] != "launching" || !launcher_may_be_alive(r),
@@ -1575,6 +1743,19 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
             ensure!(
                 saved == selected,
                 "Используйте сохранённую сессию запуска: {saved}"
+            );
+        }
+        for other in c.runs()? {
+            ensure!(
+                r["tab"].is_null()
+                    || other["id"] == r["id"]
+                    || other["tab"] != r["tab"]
+                    || other["workspace"] != r["workspace"]
+                    || other["herdr_namespace"] != r["herdr_namespace"]
+                    || ["done", "cancelled"].contains(&s(&other, "status"))
+                    || (other["task"] == r["task"] && other["status"] == "interrupted"),
+                "Таб используется другим незавершённым запуском: {}",
+                s(&other, "id")
             );
         }
         if !r["tab"].is_null() {
@@ -1592,7 +1773,7 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
                     );
                 }
                 ensure!(
-                    tab["workspace_id"] == r["workspace"],
+                    tab["workspace_id"] == r["workspace"] && tab["tab_id"] == r["tab"],
                     "Таб не принадлежит сохранённому workspace"
                 );
                 let panes = c.herdr(
@@ -1605,27 +1786,18 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
                     .iter()
                     .filter(|p| p["tab_id"] == r["tab"])
                     .collect::<Vec<_>>();
-                if !r["repository_workspace"].is_null()
-                    && status == "done"
-                    && r["git_mode"] == "branch"
-                {
-                    ensure!(
-                        panes["panes"].as_array().is_some_and(|items| items
-                            .iter()
-                            .all(|p| p["tab_id"] == r["tab"] && p["pane_id"] == r["pane"])),
-                        "В workspace worktree есть другие панели; Git cleanup остановлен"
-                    );
-                }
                 ensure!(
                     members.iter().any(|p| p["pane_id"] == r["pane"]),
                     "Сохранённая панель исполнителя отсутствует в табе; проверьте его вручную"
                 );
                 ensure!(
-                    !members
-                        .iter()
-                        .any(|p| !p["agent"].is_null() && p["pane_id"] != r["pane"]),
-                    "В табе есть другой агент; сначала отделите его от таба задачи"
+                    members.iter().all(|p| p["pane_id"] == r["pane"]),
+                    "В табе есть другая панель; сначала отделите её от таба задачи"
                 );
+                require_terminal(
+                    r,
+                    members.iter().find(|p| p["pane_id"] == r["pane"]).unwrap(),
+                )?;
                 if let Ok(caller) = std::env::var("HERDR_PANE_ID")
                     && members.iter().any(|p| p["pane_id"] == caller)
                 {
@@ -1636,6 +1808,31 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
                     return queue_completion(c, a, r);
                 }
             }
+        }
+    }
+    if let Some(r) = &r {
+        ensure!(
+            workspace_cleanup_scope(c, r)? != "preserved_other_run",
+            "Workspace используется другим незавершённым запуском; завершение остановлено"
+        );
+        let frozen_removal = r["git_completion"]["repositories"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|item| {
+                item["path"] == r["repository_workspace"]["path"] && item["mode"] == "push_branch"
+            });
+        if !r["repository_workspace"].is_null()
+            && let Some(panes) = workspace_panes(c, r)?
+            && status == "done"
+            && (t["git_mode"] == "branch" || frozen_removal)
+        {
+            ensure!(
+                panes
+                    .iter()
+                    .all(|p| p["tab_id"] == r["tab"] && p["pane_id"] == r["pane"]),
+                "В workspace worktree есть другие панели; Git cleanup остановлен"
+            );
         }
     }
     if let Some(r) = &mut r
@@ -1667,10 +1864,12 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
     let Some(r) = &mut r else {
         return Ok(json!({"task":t["id"],"status":t["status"],"cleanup":"no_run"}));
     };
-    r["cleanup"] = json!({"tab":r["tab"],"pane":r["pane"],"at":now(),"status":"pending"});
+    r["cleanup"] = json!({"tab":r["tab"],"pane":r["pane"],"terminal_id":terminal_id,"workspace":r["workspace"],"at":now(),"status":"pending"});
     c.update(r, &mut t)?;
     let cleanup = (|| {
-        if tab.is_some() {
+        let workspace_status = cleanup_workspace(c, r)?;
+        r["cleanup"]["workspace_status"] = json!(workspace_status);
+        if workspace_status != "closed" && tab.is_some() {
             c.herdr(&["tab", "close", s(r, "tab")], r["herdr_session"].as_str())?;
             ensure!(
                 saved_tab(c, r)?.is_none(),

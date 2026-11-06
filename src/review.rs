@@ -290,6 +290,41 @@ fn load(c: &Context, r: &Value) -> Result<Value> {
     }
     Ok(data)
 }
+
+pub fn handoff(c: &Context, a: &Value, cycles: usize) -> Value {
+    let action = match s(a, "status") {
+        "pending" => "run_independent_review",
+        "running" => "wait_for_reviewer",
+        "passed" if a["stale"] != true => "present_result",
+        "changes_requested" if a["stale"] != true && cycles < 2 => "fix_findings",
+        "changes_requested" => "ask_user",
+        _ => "report_review_failure",
+    };
+    json!({
+        "ready_for_user": action == "present_result",
+        "action": action,
+        "instructions": c.program.join("docs/agent-review.md"),
+        "automatic_returns_remaining": 2_usize.saturating_sub(cycles),
+        "next": "Исполнитель продолжает auto в текущем ходе: claim pending, свежий subagent без истории переписки, conclude. При changes_requested подготовь review-feedback, исправь замечания сам в том же запуске и повтори finish; максимум два возврата. Passed разрешает показать результат, failed требует явно сообщить сбой. Complete выполняется только по поручению пользователя."
+    })
+}
+
+pub fn finish_handoff(c: &Context, r: &Value, a: &Value) -> Result<Value> {
+    Ok(handoff(c, a, automatic_returns(&load(c, r)?)))
+}
+
+fn automatic_returns(data: &Value) -> usize {
+    data["attempts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|a| {
+            (!a["feedback_started"].is_null() || !a["feedback_delivered"].is_null())
+                && a["feedback_user_requested"] != true
+        })
+        .count()
+}
+
 pub fn request(c: &Context, t: &Value, r: &Value) -> Result<Value> {
     ensure!(
         t["agent_review_policy"] != "off",
@@ -451,6 +486,17 @@ pub fn handle(c: &Context, name: &str, args: &Value) -> Result<Value> {
         for a in view["attempts"].as_array_mut().unwrap() {
             a["stale"] = json!(version.as_ref() != Some(&a["version"]));
         }
+        if t["agent_review_policy"] == "auto" {
+            view["handoff"] = handoff(
+                c,
+                view["attempts"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap_or(&Value::Null),
+                automatic_returns(&data),
+            );
+        }
         return Ok(view);
     }
     let attempts = data["attempts"].as_array().unwrap();
@@ -572,6 +618,23 @@ pub fn handle(c: &Context, name: &str, args: &Value) -> Result<Value> {
     }
     data["attempts"][index] = a.clone();
     c.save(&review_file(c, &r)?, &data)?;
+    if name == "review-conclude" && t["agent_review_policy"] == "auto" {
+        a["handoff"] = handoff(c, &a, automatic_returns(&data));
+        let title = match s(&a["handoff"], "action") {
+            "present_result" => Some("Готово к приёмке"),
+            "report_review_failure" => Some("Сбой агентского ревью"),
+            "ask_user" => Some("Исчерпан лимит доработок"),
+            _ => None,
+        };
+        if let Some(title) = title {
+            core::notification(
+                c,
+                &format!("{title}: {}", s(&t, "title")),
+                &a["result"].to_string(),
+                Some(&r),
+            )?;
+        }
+    }
     Ok(a)
 }
 fn feedback(
@@ -607,15 +670,7 @@ fn feedback(
                 "Нужны актуальные замечания"
             );
         }
-        let count = data["attempts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|a| {
-                (!a["feedback_started"].is_null() || !a["feedback_delivered"].is_null())
-                    && a["feedback_user_requested"] != true
-            })
-            .count();
+        let count = automatic_returns(&data);
         ensure!(
             count < 2 || args["user_requested"] == true,
             "Лимит двух автоматических циклов; нужен пользователь"
