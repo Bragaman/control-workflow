@@ -574,6 +574,7 @@ fn worker(c: &Context, name: &str, a: &Value) -> Result<Value> {
             ["launch_failed", "interrupted"].contains(&s(&r, "status")),
             "Восстановление старта доступно только для launch_failed/interrupted"
         );
+        review::guard_restart(c, &t)?;
         ensure!(
             !external::launcher_may_be_alive(&r),
             "Подготовитель ещё работает"
@@ -618,6 +619,7 @@ fn worker(c: &Context, name: &str, a: &Value) -> Result<Value> {
             Ok(json!({"run":run,"status":"blocked","notification":event}))
         }
         "finish" => {
+            review::guard_prior_verdicts(c, &r)?;
             let source = Path::new(s(a, "report"));
             let report = fs::read_to_string(source)?;
             ensure!(!report.trim().is_empty(), "Отчёт не может быть пустым");
@@ -666,7 +668,7 @@ fn worker(c: &Context, name: &str, a: &Value) -> Result<Value> {
             c.update(&mut r, &mut t)?;
             let mut agent_review = Value::Null;
             if t["agent_review_policy"] == "auto" {
-                agent_review = match review::request(c, &t, &r) {
+                agent_review = match review::request(c, &t, &r, false) {
                     Ok(v) => v,
                     Err(e) => {
                         let v = json!({"status":"failed","error":e.to_string()});

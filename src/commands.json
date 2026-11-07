@@ -257,6 +257,18 @@
         "multiple": true,
         "boolean": false,
         "integer": false
+      },
+      {
+        "name": "user_requested",
+        "flags": [
+          "--user-requested"
+        ],
+        "required": false,
+        "default": false,
+        "choices": null,
+        "multiple": false,
+        "boolean": true,
+        "integer": false
       }
     ]
   },
@@ -361,6 +373,35 @@
     ]
   },
   {
+    "name": "review-terminal-create",
+    "options": [
+      {
+        "name": "run",
+        "flags": [
+          "--run"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "id",
+        "flags": [
+          "--id"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
     "name": "review-claim",
     "options": [
       {
@@ -410,6 +451,18 @@
         "multiple": false,
         "boolean": false,
         "integer": true
+      },
+      {
+        "name": "pane",
+        "flags": [
+          "--pane"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
       }
     ]
   },
@@ -456,6 +509,59 @@
         "name": "result",
         "flags": [
           "--result"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "review-release",
+    "options": [
+      {
+        "name": "run",
+        "flags": [
+          "--run"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "id",
+        "flags": [
+          "--id"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "actor",
+        "flags": [
+          "--actor"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "evidence",
+        "flags": [
+          "--evidence"
         ],
         "required": true,
         "default": null,

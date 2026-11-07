@@ -296,7 +296,7 @@ pub fn handoff(c: &Context, a: &Value, cycles: usize) -> Value {
         "pending" => "run_independent_review",
         "running" => "wait_for_reviewer",
         "passed" if a["stale"] != true => "present_result",
-        "changes_requested" if a["stale"] != true && cycles < 2 => "fix_findings",
+        "changes_requested" if a["stale"] != true && cycles < 1 => "fix_findings",
         "changes_requested" => "ask_user",
         _ => "report_review_failure",
     };
@@ -304,13 +304,23 @@ pub fn handoff(c: &Context, a: &Value, cycles: usize) -> Value {
         "ready_for_user": action == "present_result",
         "action": action,
         "instructions": c.program.join("docs/agent-review.md"),
-        "automatic_returns_remaining": 2_usize.saturating_sub(cycles),
-        "next": "Исполнитель продолжает auto в текущем ходе: claim pending, свежий subagent без истории переписки, conclude. При changes_requested подготовь review-feedback, исправь замечания сам в том же запуске и повтори finish; максимум два возврата. Passed разрешает показать результат, failed требует явно сообщить сбой. Complete выполняется только по поручению пользователя."
+        "automatic_returns_remaining": 1_usize.saturating_sub(cycles),
+        "next": "Исполнитель продолжает auto в текущем ходе: claim pending, свежий subagent без истории переписки, conclude. При changes_requested подготовь review-feedback, исправь замечания сам в том же запуске и повтори finish; максимум один автоматический возврат на задачу. Passed разрешает показать результат, failed требует явно сообщить сбой. Complete выполняется только по поручению пользователя."
     })
 }
 
 pub fn finish_handoff(c: &Context, r: &Value, a: &Value) -> Result<Value> {
-    Ok(handoff(c, a, automatic_returns(&load(c, r)?)))
+    Ok(handoff(c, a, task_automatic_returns(c, r, &load(c, r)?)?))
+}
+
+fn task_automatic_returns(c: &Context, r: &Value, current: &Value) -> Result<usize> {
+    let mut count = automatic_returns(current);
+    for other in c.runs()? {
+        if other["task"] == r["task"] && other["id"] != r["id"] {
+            count += automatic_returns(&load(c, &other)?);
+        }
+    }
+    Ok(count)
 }
 
 fn automatic_returns(data: &Value) -> usize {
@@ -319,13 +329,78 @@ fn automatic_returns(data: &Value) -> usize {
         .into_iter()
         .flatten()
         .filter(|a| {
-            (!a["feedback_started"].is_null() || !a["feedback_delivered"].is_null())
+            (!a["feedback_started"].is_null()
+                || !a["feedback_delivered"].is_null()
+                || !s(a, "feedback_message").is_empty())
                 && a["feedback_user_requested"] != true
         })
         .count()
 }
 
-pub fn request(c: &Context, t: &Value, r: &Value) -> Result<Value> {
+fn foreground_identity(c: &Context, r: &Value, pane: &str) -> Result<Value> {
+    let info = c.herdr(
+        &["pane", "process-info", "--pane", pane],
+        r["herdr_session"].as_str(),
+    )?;
+    let process = &info["process_info"];
+    let group = process["foreground_process_group_id"].as_i64().unwrap_or(0);
+    let members = process["foreground_processes"]
+        .as_array()
+        .ok_or_else(|| anyhow!("Нет списка foreground процессов"))?;
+    ensure!(
+        process["pane_id"] == pane
+            && group > 0
+            && process["shell_pid"] != group
+            && members.iter().any(|p| p["pid"] == group),
+        "Не подтверждён foreground процесс ревьюера"
+    );
+    let mut ids = members
+        .iter()
+        .map(|p| p["pid"].as_i64().unwrap_or(0))
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    let processes = ids
+        .into_iter()
+        .map(|pid| {
+            let identity = external::identity(pid)
+                .ok_or_else(|| anyhow!("Не подтверждена идентичность foreground процесса"))?;
+            Ok(json!({"pid":pid,"identity":identity}))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(json!({"group":group,"processes":processes}))
+}
+
+/// A new run must not silently discard the last unresolved verdict of an older run.
+pub fn guard_prior_verdicts(c: &Context, r: &Value) -> Result<()> {
+    for old in c.runs()? {
+        if old["task"] != r["task"] || old["id"] == r["id"] {
+            continue;
+        }
+        let data = load(c, &old)?;
+        if let Some(a) = data["attempts"].as_array().and_then(|v| v.last())
+            && ["changes_requested", "failed"].contains(&s(a, "status"))
+            && a["feedback_started"].is_null()
+            && a["feedback_delivered"].is_null()
+            && s(a, "feedback_message").is_empty()
+        {
+            bail!(
+                "Не обработано заключение {} запуска {}; нужно явное разрешение через review-feedback --run {} --id {} --user-requested",
+                s(a, "id"),
+                s(&old, "id"),
+                s(&old, "id"),
+                s(a, "id")
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn guard_restart(c: &Context, t: &Value) -> Result<()> {
+    guard_prior_verdicts(c, &json!({"task": t["id"], "id": ""}))
+}
+
+pub fn request(c: &Context, t: &Value, r: &Value, user_requested: bool) -> Result<Value> {
     ensure!(
         t["agent_review_policy"] != "off",
         "Агентское ревью отключено для задачи"
@@ -337,6 +412,10 @@ pub fn request(c: &Context, t: &Value, r: &Value) -> Result<Value> {
     let mut data = load(c, r)?;
     let fresh = snapshot(c, t, r, None)?;
     if let Some(last) = data["attempts"].as_array_mut().unwrap().last_mut() {
+        ensure!(
+            last["status"] != "failed" || user_requested || last["feedback_user_requested"] == true,
+            "После failed нужен новый явный запрос пользователя: review-request --user-requested"
+        );
         if last["status"] == "running" {
             return Ok(last.clone());
         }
@@ -348,6 +427,12 @@ pub fn request(c: &Context, t: &Value, r: &Value) -> Result<Value> {
             last["conclusion"] = json!("Снимок устарел до запуска");
             last["finished_at"] = json!(now());
         }
+        ensure!(
+            last["status"] != "changes_requested"
+                || !last["feedback_started"].is_null()
+                || last["version"] == fresh["version"],
+            "Замечания не переданы на доработку; используйте review-feedback, при устаревшем снимке — с явным поручением пользователя"
+        );
         if last["version"] == fresh["version"]
             && ["passed", "changes_requested"].contains(&s(last, "status"))
         {
@@ -369,7 +454,7 @@ pub fn request(c: &Context, t: &Value, r: &Value) -> Result<Value> {
     c.save(&dest.join("snapshot.json"), &frozen)?;
     let packet = dest.join("packet.md");
     store::atomic(&packet,format!("# Независимое ревью\n\nКоманда входа: `{} review-read --run {} --id {id}`\n\nПроверь task.goal и task.acceptance самостоятельно. Используй --section files/diff/blob/manifest для фиксированных входных данных. Отчёт исполнителя содержит утверждения, которые нужно проверить. Проверяющий не исправляет материалы. Выполняй проверки в отдельном временном каталоге. Недоступность необходимых доказательств означает failed.\n\nВерни JSON: version из entry, status (passed|changes_requested|failed), conclusion, findings, suggestions, evidence (непустой список), limitations (списки строк). passed допускается без обязательных замечаний и не означает complete, merge или push.\n",crate::lifecycle::entry_command(c),s(r,"id")).as_bytes())?;
-    let a = json!({"id":id,"version":frozen["version"],"status":"pending","created_at":now(),"packet":packet,"snapshot":dest.join("snapshot.json"),"submission":r["result_revision"].as_u64().unwrap_or(0)});
+    let a = json!({"id":id,"version":frozen["version"],"status":"pending","created_at":now(),"packet":packet,"snapshot":dest.join("snapshot.json"),"submission":r["result_revision"].as_u64().unwrap_or(0),"request_user_requested":user_requested});
     data["attempts"].as_array_mut().unwrap().push(a.clone());
     c.save(&review_file(c, r)?, &data)?;
     Ok(a)
@@ -449,6 +534,98 @@ fn read_section(c: &Context, a: &Value, args: &Value) -> Result<Value> {
 pub fn handle(c: &Context, name: &str, args: &Value) -> Result<Value> {
     let mut r = c.read(&c.run_file(s(args, "run"))?)?;
     let mut t = c.task(s(&r, "task"))?;
+    if name == "review-release" {
+        ensure!(
+            !s(args, "evidence").trim().is_empty(),
+            "Нужно доказательство закрытия ревьюера"
+        );
+        let mut history = load(c, &r)?;
+        let a = history["attempts"]
+            .as_array_mut()
+            .and_then(|v| v.iter_mut().find(|a| a["id"] == args["id"]))
+            .ok_or_else(|| anyhow!("Нет такой попытки ревью"))?;
+        let unresolved_creation = a["terminal_intent"]["status"] == "creating"
+            && a["owner"].is_null()
+            && s(a, "actor").is_empty()
+            && s(args, "actor").is_empty();
+        ensure!(
+            (a["actor"] == args["actor"] && !s(a, "actor").is_empty()) || unresolved_creation,
+            "Не совпадает actor ревьюера"
+        );
+        ensure!(
+            a["owner"]["kind"] != "terminal",
+            "Терминального ревьюера закрывает complete после проверки Herdr"
+        );
+        if a["reviewer_cleanup"]["status"] != "closed" {
+            a["reviewer_cleanup"] =
+                json!({"status":"closed", "at":now(), "evidence":args["evidence"]});
+        }
+        if a["status"] == "running" {
+            a["status"] = json!("failed");
+            a["conclusion"] = json!("Ревьюер закрыт до заключения");
+            a["finished_at"] = json!(now());
+        }
+        let result = a.clone();
+        c.save(&review_file(c, &r)?, &history)?;
+        return Ok(result);
+    }
+    let prior_run = t["active_run"] != r["id"];
+    let interrupted_current =
+        t["active_run"] == r["id"] && t["status"] == "ready" && r["status"] == "interrupted";
+    if (prior_run || interrupted_current)
+        && name == "review-feedback"
+        && args["user_requested"] == true
+    {
+        ensure!(
+            args["delivered"] != true,
+            "Сначала зафиксируйте разрешение отдельно от подтверждения доставки"
+        );
+        let active = c.current(&t, s(&t, "active_run"))?;
+        ensure!(
+            (prior_run && active["status"] == "running") || interrupted_current,
+            "Нет доступного запуска для продолжения"
+        );
+        let mut history = load(c, &r)?;
+        let a = history["attempts"]
+            .as_array_mut()
+            .and_then(|v| v.last_mut())
+            .ok_or_else(|| anyhow!("Нет заключения прежнего запуска"))?;
+        ensure!(
+            a["id"] == args["id"] && ["changes_requested", "failed"].contains(&s(a, "status")),
+            "Нужно последнее незавершённое заключение прежнего запуска"
+        );
+        if a["continuation_user_requested_at"].is_null() {
+            a["continuation_user_requested_at"] = json!(now());
+        }
+        if a["feedback_started"].is_null() {
+            let prepared =
+                !s(a, "feedback_message").is_empty() || !a["feedback_delivered"].is_null();
+            a["feedback_started"] = json!(now());
+            if !prepared {
+                a["feedback_user_requested"] = json!(true);
+            }
+            a["feedback_target_run"] = if prior_run {
+                active["id"].clone()
+            } else {
+                Value::Null
+            };
+            let target = if prior_run {
+                "текущем"
+            } else {
+                "следующем"
+            };
+            if !prepared {
+                a["feedback_message"] = json!(format!(
+                    "{}: Продолжи по явному поручению пользователя в {target} запуске. Замечания: {}",
+                    s(&t, "id"),
+                    strings(&a["result"]["findings"]).join("; ")
+                ));
+            }
+        }
+        let result = a.clone();
+        c.save(&review_file(c, &r)?, &history)?;
+        return Ok(result);
+    }
     c.current(&t, s(args, "run"))?;
     if name == "review-request" {
         if !args["artifact"].is_null() {
@@ -466,7 +643,7 @@ pub fn handle(c: &Context, name: &str, args: &Value) -> Result<Value> {
             r["review_artifacts"] = json!(artifacts);
             c.update(&mut r, &mut t)?;
         }
-        return request(c, &t, &r);
+        return request(c, &t, &r, args["user_requested"] == true);
     }
     let mut data = load(c, &r)?;
     if name == "review-show" {
@@ -494,7 +671,7 @@ pub fn handle(c: &Context, name: &str, args: &Value) -> Result<Value> {
                     .unwrap()
                     .last()
                     .unwrap_or(&Value::Null),
-                automatic_returns(&data),
+                task_automatic_returns(c, &r, &data)?,
             );
         }
         return Ok(view);
@@ -526,6 +703,61 @@ pub fn handle(c: &Context, name: &str, args: &Value) -> Result<Value> {
         );
     }
     match name {
+        "review-terminal-create" => {
+            ensure!(
+                a["status"] == "pending",
+                "Терминал можно создать только для ожидающего ревью"
+            );
+            ensure!(
+                a["owner"].is_null() && a["terminal_intent"].is_null(),
+                "Терминал уже создан или исход создания неизвестен; нужна сверка"
+            );
+            ensure!(
+                !r["herdr_namespace"].is_null()
+                    && !s(&r, "pane").is_empty()
+                    && !s(&r, "terminal_id").is_empty(),
+                "Не подтверждён терминал исполнителя"
+            );
+            c.check_namespace(&r)?;
+            let list = c.herdr(
+                &["pane", "list", "--workspace", s(&r, "workspace")],
+                r["herdr_session"].as_str(),
+            )?;
+            ensure!(
+                list["panes"].as_array().is_some_and(|v| v
+                    .iter()
+                    .any(|p| p["pane_id"] == r["pane"]
+                        && p["terminal_id"] == r["terminal_id"]
+                        && p["tab_id"] == r["tab"])),
+                "Терминал исполнителя не подтверждён"
+            );
+            a["terminal_intent"] = json!({"at":now(), "status":"creating"});
+            data["attempts"][index] = a.clone();
+            c.save(&review_file(c, &r)?, &data)?;
+            let split = c.herdr(
+                &[
+                    "pane",
+                    "split",
+                    "--pane",
+                    s(&r, "pane"),
+                    "--direction",
+                    "right",
+                    "--cwd",
+                    s(&r, "cwd"),
+                    "--no-focus",
+                ],
+                r["herdr_session"].as_str(),
+            )?;
+            let p = &split["pane"];
+            ensure!(
+                !s(p, "pane_id").is_empty()
+                    && !s(p, "terminal_id").is_empty()
+                    && p["pane_id"] != r["pane"],
+                "Herdr не подтвердил идентификаторы новой панели; нужна сверка"
+            );
+            a["owner"] = json!({"kind":"terminal", "run":r["id"], "namespace":r["herdr_namespace"], "workspace":r["workspace"], "tab":r["tab"], "pane":p["pane_id"], "terminal_id":p["terminal_id"]});
+            a["terminal_intent"]["status"] = json!("created");
+        }
         "review-claim" => {
             if a["status"] == "running" && a["actor"] == args["actor"] {
                 return Ok(a);
@@ -548,6 +780,68 @@ pub fn handle(c: &Context, name: &str, args: &Value) -> Result<Value> {
             }
             a["status"] = json!("running");
             a["actor"] = args["actor"].clone();
+            a["owner"] = if let Some(pane) = args["pane"].as_str() {
+                ensure!(
+                    a["terminal_intent"]["status"] == "created"
+                        && a["owner"]["pane"] == pane
+                        && a["owner"]["run"] == r["id"],
+                    "Принадлежность pane не подтверждена созданием для этой попытки"
+                );
+                ensure!(
+                    !r["herdr_namespace"].is_null() && pane != s(&r, "pane"),
+                    "Не подтверждён namespace или pane совпадает с исполнителем"
+                );
+                c.check_namespace(&r)?;
+                let list = c.herdr(
+                    &["pane", "list", "--workspace", s(&r, "workspace")],
+                    r["herdr_session"].as_str(),
+                )?;
+                let p = list["panes"]
+                    .as_array()
+                    .and_then(|v| v.iter().find(|p| p["pane_id"] == pane))
+                    .ok_or_else(|| anyhow!("Pane ревьюера не найден в workspace запуска"))?;
+                ensure!(
+                    !s(p, "terminal_id").is_empty() && !s(p, "tab_id").is_empty(),
+                    "Нет идентификатора терминала или таба ревьюера"
+                );
+                for other in c.runs()? {
+                    ensure!(
+                        other["id"] == r["id"]
+                            || other["herdr_namespace"] != r["herdr_namespace"]
+                            || other["pane"] != pane
+                            || ["done", "cancelled"].contains(&s(&other, "status")),
+                        "Pane принадлежит другому запуску"
+                    );
+                }
+                ensure!(
+                    a["owner"]["terminal_id"] == p["terminal_id"]
+                        && a["owner"]["tab"] == p["tab_id"],
+                    "Терминал ревьюера изменился после создания"
+                );
+                let live = c.herdr(
+                    &["agent", "get", s(args, "actor")],
+                    r["herdr_session"].as_str(),
+                )?;
+                let agent = &live["agent"];
+                ensure!(
+                    agent["name"] == args["actor"]
+                        && agent["pane_id"] == pane
+                        && agent["terminal_id"] == p["terminal_id"]
+                        && agent["tab_id"] == p["tab_id"]
+                        && !s(&agent["agent_session"], "value").is_empty(),
+                    "Herdr не подтвердил идентичность агента в терминале ревьюера"
+                );
+                let mut owner = a["owner"].clone();
+                owner["agent_session"] = agent["agent_session"].clone();
+                owner["foreground"] = foreground_identity(c, &r, pane)?;
+                owner
+            } else {
+                ensure!(
+                    a["owner"].is_null(),
+                    "Для созданного терминала укажите --pane"
+                );
+                json!({"kind":"subagent", "run":r["id"], "actor":args["actor"]})
+            };
             a["started_at"] = json!(now());
             a["deadline"] = json!(
                 (chrono::Utc::now()
@@ -619,7 +913,7 @@ pub fn handle(c: &Context, name: &str, args: &Value) -> Result<Value> {
     data["attempts"][index] = a.clone();
     c.save(&review_file(c, &r)?, &data)?;
     if name == "review-conclude" && t["agent_review_policy"] == "auto" {
-        a["handoff"] = handoff(c, &a, automatic_returns(&data));
+        a["handoff"] = handoff(c, &a, task_automatic_returns(c, &r, &data)?);
         let title = match s(&a["handoff"], "action") {
             "present_result" => Some("Готово к приёмке"),
             "report_review_failure" => Some("Сбой агентского ревью"),
@@ -636,6 +930,159 @@ pub fn handle(c: &Context, name: &str, args: &Value) -> Result<Value> {
         }
     }
     Ok(a)
+}
+
+/// Close only terminal reviewers created and identified by this program. A subagent
+/// belongs to its spawning agent, so return an explicit handoff instead of guessing.
+pub fn cleanup_reviewers(c: &Context, t: &Value) -> Result<Vec<Value>> {
+    let all_runs = c.runs()?;
+    let runs = all_runs
+        .iter()
+        .filter(|r| r["task"] == t["id"])
+        .collect::<Vec<_>>();
+    let mut pending = Vec::new();
+    for r in &runs {
+        let data = load(c, r)?;
+        for a in data["attempts"].as_array().into_iter().flatten() {
+            if a["reviewer_cleanup"]["status"] == "closed" {
+                continue;
+            }
+            if a["terminal_intent"]["status"] == "creating" {
+                pending.push(json!({"run":r["id"],"id":a["id"],"reason":"Исход создания терминала неизвестен; нужна сверка"}));
+            } else if a["terminal_intent"]["status"] == "created"
+                && a["owner"]["kind"] != "terminal"
+            {
+                pending.push(json!({"run":r["id"],"id":a["id"],"reason":"Запись терминала повреждена; нужна сверка"}));
+            } else if !s(a, "actor").is_empty() && a["owner"]["kind"] != "terminal" {
+                let known = a["owner"]["kind"] == "subagent"
+                    && a["owner"]["run"] == r["id"]
+                    && a["owner"]["actor"] == a["actor"];
+                pending.push(json!({"run":r["id"],"id":a["id"],"actor":a["actor"],"reason":if known {"Ведущий агент должен проверить и остановить своего subagent, затем записать review-release"} else {"Принадлежность ревьюера неизвестна; нужна сверка до закрытия"}}));
+            }
+        }
+    }
+    if !pending.is_empty() {
+        return Ok(pending);
+    }
+    for r in &runs {
+        let mut data = load(c, r)?;
+        let len = data["attempts"].as_array().map_or(0, Vec::len);
+        for i in 0..len {
+            let a = data["attempts"][i].clone();
+            if a["reviewer_cleanup"]["status"] == "closed" || a["owner"]["kind"] != "terminal" {
+                continue;
+            }
+            let owner = &a["owner"];
+            ensure!(
+                owner["run"] == r["id"]
+                    && owner["namespace"] == r["herdr_namespace"]
+                    && owner["workspace"] == r["workspace"]
+                    && owner["pane"] != r["pane"]
+                    && !s(owner, "terminal_id").is_empty(),
+                "Не подтверждена принадлежность терминала ревьюера"
+            );
+            if let (Some(saved), Some(selected)) =
+                (r["herdr_session"].as_str(), c.session.as_deref())
+            {
+                ensure!(
+                    saved == selected,
+                    "Используйте сохранённую сессию ревьюера: {saved}"
+                );
+            }
+            c.check_namespace(r)?;
+            for other in &all_runs {
+                ensure!(
+                    other["id"] == r["id"]
+                        || other["herdr_namespace"] != r["herdr_namespace"]
+                        || other["pane"] != owner["pane"]
+                        || ["done", "cancelled"].contains(&s(other, "status")),
+                    "Pane ревьюера используется другим запуском"
+                );
+            }
+            let listed = c.herdr(
+                &["pane", "list", "--workspace", s(owner, "workspace")],
+                r["herdr_session"].as_str(),
+            );
+            let panes = match listed {
+                Ok(v) => v["panes"]
+                    .as_array()
+                    .cloned()
+                    .ok_or_else(|| anyhow!("Некорректный список pane ревьюера"))?,
+                Err(e) if external::error_code(&e) == "workspace_not_found" => Vec::new(),
+                Err(e) => return Err(e),
+            };
+            if let Some(p) = panes.iter().find(|p| p["pane_id"] == owner["pane"]) {
+                ensure!(
+                    std::env::var("HERDR_PANE_ID").ok().as_deref() != Some(s(owner, "pane")),
+                    "Нельзя закрыть панель, из которой выполняется complete; повторите из другой панели"
+                );
+                ensure!(
+                    p["terminal_id"] == owner["terminal_id"] && p["tab_id"] == owner["tab"],
+                    "Терминал ревьюера изменился; чужая панель сохранена"
+                );
+                ensure!(
+                    !s(&owner["agent_session"], "value").is_empty() && !s(&a, "actor").is_empty(),
+                    "Агент в созданной панели не был подтверждён; нужна сверка"
+                );
+                let live = c
+                    .herdr(
+                        &["agent", "get", s(&a, "actor")],
+                        r["herdr_session"].as_str(),
+                    )
+                    .map_err(|e| {
+                        anyhow!("Не удалось подтвердить агента ревьюера; панель сохранена: {e}")
+                    })?;
+                let agent = &live["agent"];
+                ensure!(
+                    agent["name"] == a["actor"]
+                        && agent["pane_id"] == owner["pane"]
+                        && agent["terminal_id"] == owner["terminal_id"]
+                        && agent["tab_id"] == owner["tab"]
+                        && agent["agent_session"] == owner["agent_session"],
+                    "Агент в панели ревьюера изменился; чужая работа сохранена"
+                );
+                ensure!(
+                    !owner["foreground"].is_null()
+                        && foreground_identity(c, r, s(owner, "pane"))? == owner["foreground"],
+                    "Foreground процесс ревьюера изменился; чужая работа сохранена"
+                );
+                c.herdr(
+                    &["pane", "close", s(owner, "pane")],
+                    r["herdr_session"].as_str(),
+                )?;
+                let verify = c.herdr(
+                    &["pane", "list", "--workspace", s(owner, "workspace")],
+                    r["herdr_session"].as_str(),
+                );
+                match verify {
+                    Ok(v) => ensure!(
+                        v["panes"]
+                            .as_array()
+                            .is_some_and(|v| v.iter().all(|p| p["pane_id"] != owner["pane"])),
+                        "Herdr не подтвердил закрытие ревьюера"
+                    ),
+                    Err(e) if external::error_code(&e) == "workspace_not_found" => (),
+                    Err(e) => return Err(e),
+                }
+            }
+            let all = c.herdr(&["pane", "list"], r["herdr_session"].as_str())?;
+            ensure!(
+                all["panes"]
+                    .as_array()
+                    .is_some_and(|v| v.iter().all(|p| p["terminal_id"] != owner["terminal_id"])),
+                "Терминал ревьюера ещё существует или перемещён; нужна сверка"
+            );
+            data["attempts"][i]["reviewer_cleanup"] =
+                json!({"status":"closed","at":now(),"terminal_id":owner["terminal_id"]});
+            if a["status"] == "running" {
+                data["attempts"][i]["status"] = json!("failed");
+                data["attempts"][i]["conclusion"] = json!("Ревьюер закрыт до заключения");
+                data["attempts"][i]["finished_at"] = json!(now());
+            }
+            c.save(&review_file(c, r)?, &data)?;
+        }
+    }
+    Ok(Vec::new())
 }
 fn feedback(
     c: &Context,
@@ -670,10 +1117,10 @@ fn feedback(
                 "Нужны актуальные замечания"
             );
         }
-        let count = automatic_returns(&data);
+        let count = task_automatic_returns(c, r, &data)?;
         ensure!(
-            count < 2 || args["user_requested"] == true,
-            "Лимит двух автоматических циклов; нужен пользователь"
+            count < 1 || args["user_requested"] == true || legacy,
+            "Лимит одного автоматического цикла задачи; нужно явное поручение пользователя"
         );
         ensure!(
             t["status"] == "review" && r["status"] == "review",

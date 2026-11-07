@@ -388,6 +388,7 @@ impl Context {
                 args.get(..2),
                 Some(
                     ["pane", "rename"]
+                        | ["pane", "close"]
                         | ["pane", "run"]
                         | ["tab", "rename"]
                         | ["tab", "close"]
