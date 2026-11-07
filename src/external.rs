@@ -172,6 +172,10 @@ pub fn launcher_state(r: &Value) -> ProcessState {
         return Unknown;
     }
     let saved = &r["worker_identity"];
+    // Without a saved identity, a mismatch cannot prove that the launcher exited.
+    if saved.is_null() {
+        return Unknown;
+    }
     let current = identity(std::process::id() as i64);
     if let Some(current) = &current {
         if !saved["boot_id"].is_null() && saved["boot_id"] != current["boot_id"] {

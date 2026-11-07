@@ -482,6 +482,19 @@ fn native_process_identity_detects_previous_boot_and_pid_reuse() {
 }
 
 #[test]
+fn launcher_without_saved_identity_is_unknown() {
+    use control_workflow::external::{self, ProcessState};
+    let pid = std::process::id() as i64;
+    for worker in [
+        json!({"worker_pid":pid}),
+        json!({"worker_pid":pid,"worker_identity":null}),
+    ] {
+        assert_eq!(external::launcher_state(&worker), ProcessState::Unknown);
+        assert!(external::launcher_may_be_alive(&worker));
+    }
+}
+
+#[test]
 fn launcher_lease_is_authoritative_and_missing_evidence_is_unknown() {
     use control_workflow::external::{self, ProcessState::*};
     use std::os::fd::AsRawFd;
