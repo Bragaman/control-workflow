@@ -451,7 +451,7 @@ class ControlTests(unittest.TestCase):
 
     def test_agent_review_reservations_limit_without_delivery_ack(self):
         r, a = self.agent_review_changes()
-        for cycle in range(1):
+        for cycle in range(3):
             self.cli("review-feedback", "--run", r["id"], "--id", a["id"])
             self.cli("review-feedback", "--run", r["id"], "--id", a["id"])
             report = self.root / "same.md"
@@ -515,16 +515,9 @@ class ControlTests(unittest.TestCase):
         verdict.write_text(json.dumps(dict(version=second['version'], status='changes_requested', conclusion='Still broken',
                                            findings=['Fix again'], suggestions=[], evidence=['Reproduced'], limitations=[])))
         result = self.cli('review-conclude', '--run', current['id'], '--id', second['id'], '--actor', 'reviewer2', '--result', str(verdict))
-        self.assertEqual(result['handoff']['action'], 'ask_user')
-        self.assertEqual(result['handoff']['automatic_returns_remaining'], 0)
-        self.cli('review-feedback', '--run', current['id'], '--id', second['id'], ok=False)
-        self.cli('task-set', 'task1', '--status', 'ready')
-        before = sum(c[:2] == ['agent', 'start'] for c in self.calls())
-        self.cli('start', 'task1', ok=False)
-        self.assertEqual(sum(c[:2] == ['agent', 'start'] for c in self.calls()), before)
-        self.cli('review-feedback', '--run', current['id'], '--id', second['id'], '--user-requested')
-        continued = self.start()
-        self.assertIn(str(self.root / 'runs' / current['id'] / 'agent-review.json'), (self.root / 'runs' / continued['id'] / 'assignment.md').read_text())
+        self.assertEqual(result['handoff']['action'], 'fix_findings')
+        self.assertEqual(result['handoff']['automatic_returns_remaining'], 2)
+        self.cli('review-feedback', '--run', current['id'], '--id', second['id'])
 
     def test_complete_does_not_guess_legacy_reviewer_ownership(self):
         r, attempt = self.agent_review_changes()
@@ -621,8 +614,8 @@ class ControlTests(unittest.TestCase):
         verdict.write_text(json.dumps(dict(version=attempt['version'], status='changes_requested', conclusion='Still broken',
                                            findings=['Fix again'], suggestions=[], evidence=['Reproduced'], limitations=[])))
         result = self.cli('review-conclude', '--run', current['id'], '--id', attempt['id'], '--actor', 'reviewer2', '--result', str(verdict))
-        self.assertEqual(result['handoff']['action'], 'ask_user')
-        self.assertEqual(result['handoff']['automatic_returns_remaining'], 0)
+        self.assertEqual(result['handoff']['action'], 'fix_findings')
+        self.assertEqual(result['handoff']['automatic_returns_remaining'], 2)
 
     def test_agent_review_repairs_partial_run_task_write(self):
         r, a = self.agent_review_changes()
@@ -646,11 +639,11 @@ class ControlTests(unittest.TestCase):
             result.write_text(json.dumps(dict(version=a["version"], status=status,
                 conclusion="Проверено", findings=findings, suggestions=[], evidence=["Самостоятельная проверка"], limitations=[])))
             return self.cli("review-conclude", "--run", r["id"], "--id", a["id"], "--actor", "agent1", "--result", str(result))
-        for cycle in range(2):
+        for cycle in range(4):
             self.cli("review-claim", "--run", r["id"], "--id", a["id"], "--actor", "agent1")
             self.cli("review-claim", "--run", r["id"], "--id", a["id"], "--actor", "other", ok=False)
             conclude("changes_requested", ["Исправить критерий"])
-            if cycle == 1:
+            if cycle == 3:
                 self.cli("review-feedback", "--run", r["id"], "--id", a["id"], ok=False)
                 break
             msg = self.cli("review-feedback", "--run", r["id"], "--id", a["id"])
@@ -774,7 +767,7 @@ class ControlTests(unittest.TestCase):
         self.create('task1', '--agent-review-policy', 'auto')
         r = self.start()
         report = self.root / 'report.md'; report.write_text('Review this')
-        for cycle in range(2):
+        for cycle in range(4):
             a = self.cli('finish', '--run', r['id'], '--report', str(report))['agent_review']
             self.cli('review-claim', '--run', r['id'], '--id', a['id'], '--actor', f'reviewer-{cycle}')
             verdict = self.root / 'verdict.json'
@@ -783,8 +776,9 @@ class ControlTests(unittest.TestCase):
             out = self.cli('review-conclude', '--run', r['id'], '--id', a['id'],
                            '--actor', f'reviewer-{cycle}', '--result', str(verdict))
             self.assertFalse(out['handoff']['ready_for_user'])
-            self.assertEqual(out['handoff']['action'], 'fix_findings' if cycle < 1 else 'ask_user')
-            if cycle < 1:
+            self.assertEqual(out['handoff']['action'], 'fix_findings' if cycle < 3 else 'ask_user')
+            self.assertEqual(out['handoff']['automatic_returns_remaining'], 3 - cycle)
+            if cycle < 3:
                 self.cli('review-feedback', '--run', r['id'], '--id', a['id'])
                 self.cli('review-feedback', '--run', r['id'], '--id', a['id'], '--delivered')
         self.cli('review-feedback', '--run', r['id'], '--id', a['id'], ok=False)

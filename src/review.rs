@@ -291,12 +291,16 @@ fn load(c: &Context, r: &Value) -> Result<Value> {
     Ok(data)
 }
 
+const MAX_AUTOMATIC_RETURNS: usize = 3;
+
 pub fn handoff(c: &Context, a: &Value, cycles: usize) -> Value {
     let action = match s(a, "status") {
         "pending" => "run_independent_review",
         "running" => "wait_for_reviewer",
         "passed" if a["stale"] != true => "present_result",
-        "changes_requested" if a["stale"] != true && cycles < 1 => "fix_findings",
+        "changes_requested" if a["stale"] != true && cycles < MAX_AUTOMATIC_RETURNS => {
+            "fix_findings"
+        }
         "changes_requested" => "ask_user",
         _ => "report_review_failure",
     };
@@ -304,8 +308,8 @@ pub fn handoff(c: &Context, a: &Value, cycles: usize) -> Value {
         "ready_for_user": action == "present_result",
         "action": action,
         "instructions": c.program.join("docs/agent-review.md"),
-        "automatic_returns_remaining": 1_usize.saturating_sub(cycles),
-        "next": "Исполнитель продолжает auto в текущем ходе: claim pending, свежий subagent без истории переписки, conclude. При changes_requested подготовь review-feedback, исправь замечания сам в том же запуске и повтори finish; максимум один автоматический возврат на задачу. Passed разрешает показать результат, failed требует явно сообщить сбой. Complete выполняется только по поручению пользователя."
+        "automatic_returns_remaining": MAX_AUTOMATIC_RETURNS.saturating_sub(cycles),
+        "next": "Исполнитель продолжает auto в текущем ходе: claim pending, свежий subagent без истории переписки, conclude. При changes_requested подготовь review-feedback, исправь замечания сам в том же запуске и повтори finish; максимум три автоматических возврата на задачу. Passed разрешает показать результат, failed требует явно сообщить сбой. Complete выполняется только по поручению пользователя."
     })
 }
 
@@ -1119,8 +1123,8 @@ fn feedback(
         }
         let count = task_automatic_returns(c, r, &data)?;
         ensure!(
-            count < 1 || args["user_requested"] == true || legacy,
-            "Лимит одного автоматического цикла задачи; нужно явное поручение пользователя"
+            count < MAX_AUTOMATIC_RETURNS || args["user_requested"] == true || legacy,
+            "Лимит трёх автоматических циклов задачи; нужно явное поручение пользователя"
         );
         ensure!(
             t["status"] == "review" && r["status"] == "review",
