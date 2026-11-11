@@ -1417,6 +1417,45 @@
     ]
   },
   {
+    "name": "git-publish",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "by",
+        "flags": [
+          "--by"
+        ],
+        "required": false,
+        "default": "user",
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "commit_message",
+        "flags": [
+          "--commit-message"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
     "name": "complete",
     "options": [
       {

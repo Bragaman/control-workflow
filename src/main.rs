@@ -13,7 +13,7 @@ fn main() {
         }
         let value = core::execute(&context, &name, &values)?;
         println!("{}", serde_json::to_string(&value)?);
-        if (["open", "complete"].contains(&name.as_str())
+        if (["open", "complete", "git-publish"].contains(&name.as_str())
             && control_workflow::lifecycle::failure(&value))
             || (name == "_complete-request" && value["status"] == "failed")
         {

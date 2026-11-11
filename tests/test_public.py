@@ -74,7 +74,7 @@ class PublicInstallTests(unittest.TestCase):
         for destination in (self.root / '.agents/skills', self.root / '.claude/skills'):
             self.call(script, 'skills', '--destination', destination)
             self.call(script, 'skills', '--destination', destination, '--action', 'check')
-            self.assertEqual(len(list(destination.iterdir())), 8)
+            self.assertEqual(len(list(destination.iterdir())), 9)
         updated = json.loads(self.call(BINARY, 'install', '--prefix', prefix).stdout)
         self.assertTrue(Path(updated['backup']).is_dir())
         self.assertEqual(before, {str(p.relative_to(state)): p.read_bytes() for p in state.rglob('*') if p.is_file()})
@@ -103,7 +103,7 @@ class PublicInstallTests(unittest.TestCase):
         self.call(BINARY, 'skills', '--destination', destination)
         foreign.unlink(); foreign.symlink_to(self.root / 'missing')
         self.call(BINARY, 'skills', '--destination', destination, '--action', 'remove', ok=False)
-        self.assertEqual(len(list(destination.iterdir())), 8)
+        self.assertEqual(len(list(destination.iterdir())), 9)
 
     def test_default_paths_are_external_and_unknown_schema_fails_before_state(self):
         script = BINARY

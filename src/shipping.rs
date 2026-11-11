@@ -193,6 +193,7 @@ pub fn skills(c: &Context, destination: &str, action: &str) -> Result<Value> {
         "control-start",
         "control-review",
         "control-complete",
+        "control-git-publish",
         "control-memory",
         "control-sync",
     ];

@@ -304,7 +304,7 @@ fn installation_update_backup_and_skill_conflicts_are_preserved() {
     let dest = temp.path().join("skills");
     let args = ["skills", "--destination", dest.to_str().unwrap()];
     assert!(invoke(&installed, &args).status.success());
-    assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 8);
+    assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 9);
     assert!(
         invoke(
             &installed,
@@ -336,7 +336,7 @@ fn installation_update_backup_and_skill_conflicts_are_preserved() {
         .status
         .success()
     );
-    assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 8);
+    assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 9);
     let alias = temp.path().join("alias");
     std::os::unix::fs::symlink(&prefix, &alias).unwrap();
     assert!(

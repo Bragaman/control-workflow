@@ -1170,3 +1170,21 @@ fn feedback(
     }
     Ok(a)
 }
+
+pub fn guard_publish(c: &Context, t: &Value, r: &Value) -> Result<()> {
+    if t["agent_review_policy"] != "auto" {
+        return Ok(());
+    }
+    let data = load(c, r)?;
+    let last = data["attempts"]
+        .as_array()
+        .and_then(|v| v.last())
+        .unwrap_or(&Value::Null);
+    let version = snapshot(c, t, r, None)?["version"].clone();
+    ensure!(
+        last["status"] == "passed"
+            && (last["version"] == version || r["published_review_version"] == version),
+        "Нужно актуальное passed агентское ревью перед сохранением"
+    );
+    Ok(())
+}

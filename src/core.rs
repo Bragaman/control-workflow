@@ -108,6 +108,10 @@ pub fn execute(c: &Context, name: &str, a: &Value) -> Result<Value> {
             let _lock = c.lock()?;
             lifecycle::complete_request(c, a)
         }
+        "git-publish" => {
+            let _lock = c.lock()?;
+            lifecycle::publish(c, a)
+        }
         "complete" => {
             let _lock = c.lock()?;
             lifecycle::complete(c, a)
@@ -309,6 +313,10 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
                 let _lock = c.lock()?;
                 r = c.read(&c.run_file(id)?)?;
                 lifecycle::reconcile_launcher(c, &mut r)?;
+            }
+            if !r["git_completion"].is_null() {
+                r["git_publication_current"] =
+                    json!(crate::git::publication_current(&r).unwrap_or(false));
             }
             let f = c.run_file(id)?.with_file_name("completion-request.json");
             if f.exists() {

@@ -14,7 +14,7 @@ if option["required"]==true{required.push(k);}properties[k]=schema;}
 }).collect()
 }
 fn description(name: &str) -> String {
-    match name{"complete"=>"Приёмка/отмена и Git/закрытие таба. Вызывать только по явному поручению пользователя; by должен совпадать с reviewer.","accept"=>"Принять результат только по явному поручению назначенного reviewer. Не выполняет Git/cleanup.","open"=>"Открыть явно выбранные задачи; возвращает текущего исполнителя или готовит новый запуск. Не повторять внешние действия при неизвестном результате.","finish"=>"Сохранить отчёт и передать в review. При auto сразу выполнить handoff: независимый subagent до итогового ответа, три автоматических возврата на задачу. Приёмка остаётся пользователю.","review-feedback"=>"Подготовить возврат замечаний исходному исполнителю; при auto исполнитель сам читает замечания, при manual управляющий доставляет сообщение.",_=>name}.into()
+    match name{"git-publish"=>"Сохранить код по Git-политике без приёмки и закрытия. Только по явному поручению reviewer.","complete"=>"Приёмка/отмена и Git/закрытие таба. Вызывать только по явному поручению пользователя; by должен совпадать с reviewer.","accept"=>"Принять результат только по явному поручению назначенного reviewer. Не выполняет Git/cleanup.","open"=>"Открыть явно выбранные задачи; возвращает текущего исполнителя или готовит новый запуск. Не повторять внешние действия при неизвестном результате.","finish"=>"Сохранить отчёт и передать в review. При auto сразу выполнить handoff: независимый subagent до итогового ответа, три автоматических возврата на задачу. Приёмка остаётся пользователю.","review-feedback"=>"Подготовить возврат замечаний исходному исполнителю; при auto исполнитель сам читает замечания, при manual управляющий доставляет сообщение.",_=>name}.into()
 }
 fn rpc_error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
@@ -110,8 +110,8 @@ fn dispatch(c: &Context, v: &Value, initialized: &mut bool) -> Option<Value> {
             let a = v["params"].get("arguments").cloned().unwrap_or(json!({}));
             match args::defaults(name, a).and_then(|a| core::execute(c, name, &a)) {
                 Ok(value) => {
-                    let is_error =
-                        ["open", "complete"].contains(&name) && lifecycle::failure(&value);
+                    let is_error = ["open", "complete", "git-publish"].contains(&name)
+                        && lifecycle::failure(&value);
                     let text = serde_json::to_string(&value).unwrap();
                     let mut structured = json!({});
                     structured["result"] = value;

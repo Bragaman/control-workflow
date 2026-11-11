@@ -2516,6 +2516,113 @@ class ControlTests(unittest.TestCase):
         self.env['FAKE_OTHER_SHELL'] = 'another-tab'
         self.assert_foreign_workspace_blocks_git(repo, wt)
 
+    def test_publish_cycles_and_complete(self):
+        repo, wt, r = self.code_review()
+        out = self.cli('git-publish', 'task1', '--commit-message', 'Update task content')
+        self.assertEqual(out['status'], 'review')
+        head = self.git(wt, 'rev-parse', 'HEAD')
+        self.assertTrue(wt.exists())
+        self.cli('git-publish', 'task1')
+        self.assertEqual(self.git(wt, 'rev-parse', 'HEAD'), head)
+        (wt / 'added.txt').write_text('second cycle')
+        self.cli('git-publish', 'task1', '--commit-message', 'Update saved artifact')
+        self.assertNotEqual(self.git(wt, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(self.cli('complete', 'task1')['status'], 'done')
+
+    def test_publish_main_origin_and_new_commit(self):
+        repo, wt, r = self.code_review(remote=True, git_mode='main')
+        self.cli('git-publish', 'task1', '--commit-message', 'Update task content')
+        (wt / 'added.txt').write_text('next commit')
+        self.git(wt, 'add', '.')
+        self.git(wt, 'commit', '-m', 'Change artifact')
+        self.cli('git-publish', 'task1')
+        self.assertEqual(self.git(self.root / 'origin.git', 'rev-parse', 'main'),
+                         self.git(repo, 'rev-parse', 'HEAD'))
+        self.assertEqual(self.cli('complete', 'task1')['status'], 'done')
+
+    def test_publish_requires_message_and_preserves_identity(self):
+        repo, wt, r = self.code_review()
+        self.cli('git-publish', 'task1', ok=False)
+        self.assertTrue(wt.exists())
+        self.env['FAKE_RECREATED_SHELL'] = '1'
+        self.cli('git-publish', 'task1', '--commit-message', 'Update task content', ok=False)
+        self.assertEqual(self.git(wt, 'rev-parse', 'HEAD'), self.git(repo, 'rev-parse', 'HEAD'))
+
+    def test_publish_multi_repository_partial_retry(self):
+        repo, wt, r = self.code_review()
+        second = self.root / 'second'
+        self.git(self.root, 'clone', str(repo), str(second))
+        self.git(second, 'remote', 'remove', 'origin')
+        self.git(second, 'config', 'user.name', 'Test')
+        self.git(second, 'config', 'user.email', 'test@example.com')
+        second_wt = self.root / 'second-wt'
+        self.git(second, 'worktree', 'add', '-b', 'feature', str(second_wt))
+        (second_wt / 'new.txt').write_text('second')
+        state_file = self.root / 'runs' / r['id'] / 'state.json'
+        state = json.loads(state_file.read_text())
+        state['worktrees'].append(dict(repository=str(second), path=str(second_wt),
+                                       branch='feature', main_branch='main'))
+        state_file.write_text(json.dumps(state))
+        hook = second / '.git/hooks/pre-commit'
+        hook.write_text('#!/bin/sh\nexit 1\n')
+        hook.chmod(0o755)
+        self.cli('git-publish', 'task1', '--commit-message', 'Update repositories', ok=False)
+        head = self.git(wt, 'rev-parse', 'HEAD')
+        hook.unlink()
+        self.cli('git-publish', 'task1', '--commit-message', 'Update repositories')
+        self.assertEqual(head, self.git(wt, 'rev-parse', 'HEAD'))
+        self.assertTrue(second_wt.exists())
+        self.assertEqual((second / 'new.txt').read_text(), 'second')
+
+    def test_publish_auto_requires_passed_review(self):
+        repo, wt, r = self.code_review()
+        self.cli('task-set', 'task1', '--agent-review-policy', 'auto')
+        out = self.cli('git-publish', 'task1', '--commit-message', 'Update task content', ok=False)
+        self.assertIn('passed', out['error'])
+        self.assertEqual(self.git(wt, 'rev-parse', 'HEAD'), self.git(repo, 'rev-parse', 'HEAD'))
+
+    def test_publish_concurrent_requests_are_serialized(self):
+        from concurrent.futures import ThreadPoolExecutor
+        repo, wt, r = self.code_review()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: self.cli('git-publish', 'task1',
+                                '--commit-message', 'Update task content'), range(2)))
+        self.assertTrue(all(v['status'] == 'review' for v in results))
+        self.assertEqual(self.git(wt, 'rev-list', '--count', 'HEAD'), '2')
+
+    def test_publish_commit_failure_preserves_review(self):
+        repo, wt, r = self.code_review()
+        hook = repo / '.git/hooks/pre-commit'
+        hook.write_text('#!/bin/sh\nexit 1\n')
+        hook.chmod(0o755)
+        self.cli('git-publish', 'task1', '--commit-message', 'Update task content', ok=False)
+        self.assertTrue(wt.exists())
+        hook.unlink()
+        self.cli('git-publish', 'task1', '--commit-message', 'Update task content')
+
+    def test_publish_push_failure_recovery(self):
+        repo, wt, r = self.code_review(remote=True)
+        hook = self.root / 'origin.git/hooks/pre-receive'
+        hook.write_text('#!/bin/sh\nexit 1\n')
+        hook.chmod(0o755)
+        self.cli('git-publish', 'task1', '--commit-message', 'Update task content', ok=False)
+        head = self.git(wt, 'rev-parse', 'HEAD')
+        hook.unlink()
+        self.cli('git-publish', 'task1')
+        self.assertTrue(wt.exists())
+        self.assertEqual(head, self.git(wt, 'rev-parse', 'HEAD'))
+
+    def test_publish_branch_retains_tree_until_complete(self):
+        repo, wt, r = self.code_review(remote=True)
+        self.cli('git-publish', 'task1', '--commit-message', 'Update task content')
+        self.assertTrue(wt.exists())
+        self.assertFalse(Path(str(self.log) + '.closed').exists())
+        head = self.git(wt, 'rev-parse', 'HEAD')
+        self.cli('git-publish', 'task1')
+        self.assertEqual(self.git(wt, 'rev-parse', 'HEAD'), head)
+        self.cli('complete', 'task1')
+        self.assertFalse(wt.exists())
+
     def test_complete_requires_message_before_staging_and_can_retry(self):
         repo, wt, r = self.code_review()
         before = self.git(wt, "rev-parse", "HEAD")

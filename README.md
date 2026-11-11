@@ -44,6 +44,7 @@ stateDiagram-v2
     blocked --> running: answer или восстановление
     running --> review: finish
     review --> ready: возврат на доработку
+    review --> review: git-publish / доработка и finish
     review --> done: complete или accept
     review --> cancelled: отмена
 ```
@@ -63,6 +64,7 @@ stateDiagram-v2
     blocked --> running: answer
     running --> review: finish
     launch_failed --> review: finish
+    review --> review: git-publish / доработка и finish
     review --> done: complete или accept
     review --> interrupted: возврат задачи
     running --> interrupted: interrupt
@@ -259,3 +261,5 @@ systemctl --user disable --now control-workflow-tick.timer
 ```
 
 Отключение таймера не прерывает текущий tick или уже работающих исполнителей. Чтобы остановить только одно расписание, используйте schedule-pause или schedule-cancel.
+
+| [control-git-publish](skills/control-git-publish/SKILL.md) | Сохранить код по общей Git-политике, оставив задачу открытой. |

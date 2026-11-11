@@ -141,13 +141,10 @@ pub fn complete_code(
     r: &mut Value,
     message: Option<&str>,
 ) -> Result<()> {
-    if r["git_completion"]["status"] == "completed" {
-        return Ok(());
-    }
     if r["git_completion"].is_null() {
         r["git_completion"] = json!({"status":"pending","repositories":[],"git_mode":t["git_mode"].as_str().unwrap_or("main")});
     }
-    let result = complete_inner(c, t, r, message.unwrap_or("").trim());
+    let result = complete_inner(c, t, r, message.unwrap_or("").trim(), true);
     if let Err(e) = &result {
         r["git_completion"]["status"] = json!("failed");
         r["git_completion"]["error"] = json!(e.to_string());
@@ -155,7 +152,13 @@ pub fn complete_code(
     }
     result
 }
-fn complete_inner(c: &Context, t: &mut Value, r: &mut Value, message: &str) -> Result<()> {
+fn complete_inner(
+    c: &Context,
+    t: &mut Value,
+    r: &mut Value,
+    message: &str,
+    cleanup: bool,
+) -> Result<()> {
     ensure!(
         r["git_completion"]["git_mode"].as_str().unwrap_or("main")
             == t["git_mode"].as_str().unwrap_or("main"),
@@ -194,8 +197,10 @@ fn complete_inner(c: &Context, t: &mut Value, r: &mut Value, message: &str) -> R
         .len();
     for i in 0..count {
         let mut item = r["git_completion"]["repositories"][i].clone();
-        let wt = Path::new(s(&item, "path"));
-        let repo = Path::new(s(&item, "repository"));
+        let wt_path = std::path::PathBuf::from(s(&item, "path"));
+        let repo_path = std::path::PathBuf::from(s(&item, "repository"));
+        let wt = wt_path.as_path();
+        let repo = repo_path.as_path();
         if item["published"] == true && item["mode"] == "push_branch" && !wt.exists() {
             ensure!(
                 git(
@@ -209,6 +214,45 @@ fn complete_inner(c: &Context, t: &mut Value, r: &mut Value, message: &str) -> R
             r["git_completion"]["repositories"][i] = item;
             checkpoint(c, t, r)?;
             continue;
+        }
+        if item["published"] == true && wt.exists() {
+            validate_worktree(&item)?;
+            let changed = git(wt, &["rev-parse", "HEAD"], false)? != s(&item, "commit")
+                || !git(wt, &["status", "--porcelain"], false)?.is_empty();
+            if changed {
+                for key in ["commit", "main_commit", "remote_commit", "published"] {
+                    item.as_object_mut().unwrap().remove(key);
+                }
+            } else {
+                let branch = if item["mode"] == "push_branch" {
+                    s(&item, "branch")
+                } else {
+                    s(&item, "main_branch")
+                };
+                let expected = if item["mode"] == "push_branch" {
+                    s(&item, "commit")
+                } else {
+                    s(&item, "main_commit")
+                };
+                let local = git(repo, &["rev-parse", &format!("refs/heads/{branch}")], false)?;
+                let remote = if item["origin"] == true {
+                    git(
+                        repo,
+                        &["ls-remote", "origin", &format!("refs/heads/{branch}")],
+                        false,
+                    )?
+                } else {
+                    String::new()
+                };
+                if local != expected
+                    || (item["origin"] == true
+                        && remote.split_whitespace().next() != Some(expected))
+                {
+                    item["published"] = json!(false);
+                }
+            }
+            r["git_completion"]["repositories"][i] = item.clone();
+            checkpoint(c, t, r)?;
         }
         if item["removed"] != true {
             validate_worktree(&item)?;
@@ -334,7 +378,7 @@ fn complete_inner(c: &Context, t: &mut Value, r: &mut Value, message: &str) -> R
             r["git_completion"]["repositories"][i] = item.clone();
             checkpoint(c, t, r)?;
         }
-        if item["mode"] == "push_branch" {
+        if cleanup && item["mode"] == "push_branch" {
             if wt.exists() {
                 git(repo, &["worktree", "remove", &wt.to_string_lossy()], false)?;
             }
@@ -346,4 +390,74 @@ fn complete_inner(c: &Context, t: &mut Value, r: &mut Value, message: &str) -> R
     r["git_completion"]["status"] = json!("completed");
     r["git_completion"].as_object_mut().unwrap().remove("error");
     checkpoint(c, t, r)
+}
+
+/// Same transaction as completion, retaining every checkout for continued work.
+pub fn publish_code(
+    c: &Context,
+    t: &mut Value,
+    r: &mut Value,
+    message: Option<&str>,
+) -> Result<()> {
+    if r["git_completion"].is_null() {
+        r["git_completion"] = json!({"status":"pending","repositories":[],"git_mode":t["git_mode"].as_str().unwrap_or("main")});
+    }
+    let result = complete_inner(c, t, r, message.unwrap_or("").trim(), false);
+    if let Err(e) = &result {
+        r["git_completion"]["status"] = json!("failed");
+        r["git_completion"]["error"] = json!(e.to_string());
+        checkpoint(c, t, r)?;
+    }
+    result
+}
+
+/// Observed freshness; never treats a persisted success as proof of current code.
+pub fn publication_current(r: &Value) -> Result<bool> {
+    if r["git_completion"]["status"] != "completed" {
+        return Ok(false);
+    }
+    for item in r["git_completion"]["repositories"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let wt = Path::new(s(item, "path"));
+        let repo = Path::new(s(item, "repository"));
+        if wt.exists() {
+            validate_worktree(item)?;
+            if !git(wt, &["status", "--porcelain"], false)?.is_empty()
+                || git(wt, &["rev-parse", "HEAD"], false)? != s(item, "commit")
+            {
+                return Ok(false);
+            }
+        } else if item["removed"] != true {
+            return Ok(false);
+        }
+        let branch = if item["mode"] == "push_branch" {
+            s(item, "branch")
+        } else {
+            s(item, "main_branch")
+        };
+        let head = if item["mode"] == "push_branch" {
+            s(item, "commit")
+        } else {
+            s(item, "main_commit")
+        };
+        if git(repo, &["rev-parse", &format!("refs/heads/{branch}")], false)? != head {
+            return Ok(false);
+        }
+        if item["origin"] == true
+            && git(
+                repo,
+                &["ls-remote", "origin", &format!("refs/heads/{branch}")],
+                false,
+            )?
+            .split_whitespace()
+            .next()
+                != Some(head)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }

@@ -2098,6 +2098,13 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
             );
         }
     }
+    if status == "done"
+        && let Some(r) = &r
+        && t["status"] == "review"
+        && t["agent_review_policy"] == "auto"
+    {
+        crate::review::guard_publish(c, &t, r)?;
+    }
     if let Some(r) = &mut r
         && status == "done"
         && git::complete_code(c, &mut t, r, a["commit_message"].as_str()).is_err()
@@ -2156,4 +2163,41 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
     }
     c.update(r, &mut t)?;
     Ok(json!({"task":t["id"],"run":r["id"],"status":t["status"],"cleanup":r["cleanup"]}))
+}
+
+/// Publish only: no acceptance, reviewer cleanup, detached worker or tab closure.
+pub fn publish(c: &Context, a: &Value) -> Result<Value> {
+    let mut t = c.task(s(a, "id"))?;
+    ensure!(t["status"] == "review", "Сначала нужен результат в review");
+    ensure!(
+        t["reviewer"] == a["by"],
+        "Сохранение поручает назначенный reviewer"
+    );
+    let mut r = c.current(&t, s(&t, "active_run"))?;
+    c.check_namespace(&r)?;
+    if !r["tab"].is_null() && saved_tab(c, &r)?.is_some() {
+        let panes = c.herdr(
+            &["pane", "list", "--workspace", s(&r, "workspace")],
+            r["herdr_session"].as_str(),
+        )?;
+        let pane = panes["panes"]
+            .as_array()
+            .and_then(|v| {
+                v.iter()
+                    .find(|p| p["pane_id"] == r["pane"] && p["tab_id"] == r["tab"])
+            })
+            .ok_or_else(|| anyhow!("Сохранённая панель отсутствует"))?;
+        require_terminal(&r, pane)?;
+    }
+    crate::review::guard_publish(c, &t, &r)?;
+    let before = crate::review::snapshot(c, &t, &r, None)?;
+    let _result = git::publish_code(c, &mut t, &mut r, a["commit_message"].as_str());
+    let after = crate::review::snapshot(c, &t, &r, None)?;
+    if before["manifest"]["files"] == after["manifest"]["files"] {
+        r["published_review_version"] = after["version"].clone();
+        c.update(&mut r, &mut t)?;
+    }
+    Ok(
+        json!({"task":t["id"],"run":r["id"],"status":t["status"],"git_completion":r["git_completion"]}),
+    )
 }

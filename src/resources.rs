@@ -55,6 +55,10 @@ pub const FILES: &[(&str, &str)] = &[
     ),
     ("docs/worker.md", include_str!("../docs/worker.md")),
     (
+        "skills/control-git-publish/SKILL.md",
+        include_str!("../skills/control-git-publish/SKILL.md"),
+    ),
+    (
         "skills/control-complete/SKILL.md",
         include_str!("../skills/control-complete/SKILL.md"),
     ),
