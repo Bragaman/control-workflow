@@ -11,3 +11,5 @@ pub mod policy;
 pub mod review;
 pub mod shipping;
 pub mod store;
+
+pub mod schedule;

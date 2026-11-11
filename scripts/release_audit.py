@@ -32,7 +32,7 @@ NATIVE_FILES = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
                 'tests/test_model_policy.py', 'tests/mcp_client.py'} | {
     'src/' + name for name in ('args.rs', 'casefold.rs', 'commands.json', 'config.rs', 'core.rs',
                                'external.rs', 'git.rs', 'lib.rs', 'lifecycle.rs',
-                               'main.rs', 'mcp.rs', 'policy.rs', 'resources.rs', 'review.rs', 'shipping.rs', 'store.rs')}
+                               'main.rs', 'mcp.rs', 'policy.rs', 'resources.rs', 'review.rs', 'schedule.rs', 'shipping.rs', 'store.rs')}
 ALLOWLIST |= NATIVE_FILES
 # The original license placeholder remains valid only in preserved historical trees.
 HISTORY_ALLOWLIST = ALLOWLIST | {'LICENSE.pending'}

@@ -1775,5 +1775,136 @@
         "integer": false
       }
     ]
+  },
+  {
+    "name": "schedule-create",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "template",
+        "flags": [
+          "--template"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "days",
+        "flags": [
+          "--days"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "time",
+        "flags": [
+          "--time"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "timezone",
+        "flags": [
+          "--timezone"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "schedule-list",
+    "options": []
+  },
+  {
+    "name": "schedule-show",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "schedule-pause",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "schedule-resume",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "schedule-cancel",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "schedule-tick",
+    "options": []
   }
 ]

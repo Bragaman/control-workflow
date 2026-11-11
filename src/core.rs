@@ -91,6 +91,7 @@ fn task_response(t: Value, compact: bool) -> Value {
 pub fn execute(c: &Context, name: &str, a: &Value) -> Result<Value> {
     crate::args::validate(name, a)?;
     match name {
+        name if name.starts_with("schedule-") => crate::schedule::handle(c, name, a),
         "start" => {
             c.require_herdr()?;
             let _lock = c.lock()?;

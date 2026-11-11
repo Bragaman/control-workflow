@@ -59,6 +59,122 @@ class InteropTests(unittest.TestCase):
             time.sleep(.02)
         self.fail(state)
 
+    def test_schedule_tick_race_cancel_and_restart(self):
+        from datetime import datetime, timedelta, timezone
+        self.cli('task-create', 'template', '--project', 'demo', '--title', 'Recurring', '--goal', 'Check', '--acceptance', 'Pass')
+        now = datetime.now(timezone.utc)
+        due = now - timedelta(minutes=2)
+        days = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+        self.cli('schedule-create', 'weekly', '--template', 'template', '--days', days[due.weekday()], '--time', due.strftime('%H:%M'), '--timezone', 'UTC')
+        file = self.state / 'schedules/weekly.json'
+        data = json.loads(file.read_text())
+        data['cursor'] = (due - timedelta(minutes=2)).isoformat()
+        file.write_text(json.dumps(data))
+        tick = subprocess.Popen(self.argv('schedule-tick'), env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        cancel = subprocess.Popen(self.argv('schedule-cancel', 'weekly'), env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for proc in (tick, cancel):
+            out, err = proc.communicate(timeout=15)
+            self.assertEqual(proc.returncode, 0, out + err)
+        schedule = self.cli('schedule-show', 'weekly')
+        self.assertEqual(schedule['status'], 'cancelled')
+        self.assertLessEqual(len(schedule['history']), 1)
+        if schedule['history']:
+            occurrence = schedule['history'][0]
+            task = self.cli('show', 'tasks', occurrence['task'])
+            self.assertEqual(task['active_run'], occurrence['run'])
+            self.assertNotEqual(task['id'], 'template')
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                state = self.cli('run', occurrence['run'])
+                if not state['launcher_alive']:
+                    break
+                time.sleep(.05)
+            self.assertFalse(state['launcher_alive'])
+        self.cli('schedule-tick')
+        self.assertEqual(self.cli('schedule-show', 'weekly')['history'], schedule['history'])
+
+    def test_schedule_concurrent_ticks_and_recovery(self):
+        from datetime import datetime, timedelta, timezone
+        self.cli('task-create', 'template', '--project', 'demo', '--title', 'T', '--goal', 'G', '--acceptance', 'A')
+        now = datetime.now(timezone.utc)
+        due = now - timedelta(minutes=2)
+        weekdays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+        self.cli('schedule-create', 'daily', '--template', 'template', '--days', weekdays[due.weekday()], '--time', due.strftime('%H:%M'), '--timezone', 'UTC')
+        path = self.state / 'schedules/daily.json'
+        record = json.loads(path.read_text())
+        record['cursor'] = (due - timedelta(minutes=2)).isoformat()
+        path.write_text(json.dumps(record))
+        processes = [subprocess.Popen(self.argv('schedule-tick'), env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+        for p in processes:
+            out, err = p.communicate(timeout=15)
+            self.assertEqual(p.returncode, 0, out + err)
+        record = self.cli('schedule-show', 'daily')
+        self.assertEqual(len(record['history']), 1)
+        item = record['history'][0]
+        self.assertEqual(item['state'], 'started')
+        self.assertIsNotNone(item['run'])
+        self.assertEqual(self.cli('show', 'tasks', item['task'])['active_run'], item['run'])
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            worker = self.cli('run', item['run'])
+            if not worker['launcher_alive']:
+                break
+            time.sleep(.05)
+        self.assertFalse(worker['launcher_alive'])
+        stored = json.loads(path.read_text())
+        stored['history'][0]['state'] = 'starting'
+        stored['history'][0]['run'] = None
+        path.write_text(json.dumps(stored))
+        self.cli('schedule-tick')
+        recovered = self.cli('schedule-show', 'daily')['history']
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(recovered[0]['run'], item['run'])
+        self.assertEqual(recovered[0]['state'], 'started')
+
+    def test_schedule_overlap_uncertain_and_manual_resolution(self):
+        from datetime import datetime, timedelta, timezone
+        self.cli('task-create', 'template', '--project', 'demo', '--title', 'T', '--goal', 'G', '--acceptance', 'A')
+        self.cli('task-create', 'prior', '--project', 'demo', '--title', 'Prior', '--goal', 'G', '--acceptance', 'A')
+        now = datetime.now(timezone.utc)
+        due = now - timedelta(minutes=2)
+        weekdays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+        self.cli('schedule-create', 'daily', '--template', 'template', '--days', weekdays[due.weekday()], '--time', due.strftime('%H:%M'), '--timezone', 'UTC')
+        path = self.state / 'schedules/daily.json'
+        record = json.loads(path.read_text())
+        record['cursor'] = (due - timedelta(minutes=2)).isoformat()
+        record['history'] = [{'state': 'starting', 'task': 'prior', 'run': None, 'scheduled_at': (due - timedelta(days=1)).isoformat()}]
+        path.write_text(json.dumps(record))
+        self.cli('schedule-tick')
+        history = self.cli('schedule-show', 'daily')['history']
+        self.assertEqual([item['state'] for item in history], ['uncertain', 'skipped_overlap'])
+        self.cli('task-set', 'prior', '--status', 'cancelled')
+        record = json.loads(path.read_text())
+        record['cursor'] = (due - timedelta(minutes=2)).isoformat()
+        path.write_text(json.dumps(record))
+        self.cli('schedule-tick')
+        history = self.cli('schedule-show', 'daily')['history']
+        self.assertEqual(history[-1]['state'], 'started')
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            worker = self.cli('run', history[-1]['run'])
+            if not worker['launcher_alive']:
+                break
+            time.sleep(.05)
+        self.assertFalse(worker['launcher_alive'])
+
+    def test_schedule_pause_resume_and_no_herdr(self):
+        self.cli('task-create', 'template', '--project', 'demo', '--title', 'T', '--goal', 'G', '--acceptance', 'A')
+        created = self.cli('schedule-create', 'daily', '--template', 'template', '--days', 'mon,tue,wed,thu,fri', '--time', '09:00', '--timezone', 'Europe/Moscow')
+        self.assertIsNotNone(created['next_at'])
+        self.assertEqual(self.cli('schedule-pause', 'daily')['status'], 'paused')
+        self.assertIsNone(self.cli('schedule-show', 'daily')['next_at'])
+        self.assertEqual(self.cli('schedule-resume', 'daily')['status'], 'active')
+        env = {k: v for k, v in self.env.items() if not k.startswith('HERDR_')}
+        proc = subprocess.run(self.argv('schedule-tick'), env=env, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('herdr-session', proc.stdout)
+        self.assertEqual(self.cli('schedule-show', 'daily')['history'], [])
+
     def test_native_processes_obey_same_flock(self):
         self.state.mkdir(exist_ok=True)
         with (self.state / '.control.lock').open('a') as lock:
