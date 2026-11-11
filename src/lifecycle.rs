@@ -1578,6 +1578,141 @@ fn saved_tab(c: &Context, r: &Value) -> Result<Option<Value>> {
     }
 }
 
+// Persist the identity before closing, so a retry cannot adopt a replacement.
+fn close_unregistered_reviewers(c: &Context, r: &Value, members: &[&Value]) -> Result<()> {
+    let file = c
+        .run_file(s(r, "id"))?
+        .with_file_name("reviewer-pane-cleanup.json");
+    if members.iter().all(|p| p["pane_id"] == r["pane"]) && !file.exists() {
+        return Ok(());
+    }
+    ensure!(
+        !r["herdr_namespace"].is_null(),
+        "Namespace запуска не подтверждён"
+    );
+    let mut saved = if file.exists() {
+        c.read(&file)?
+    } else {
+        json!({"panes": []})
+    };
+    let entries = saved["panes"]
+        .as_array()
+        .ok_or_else(|| anyhow!("Повреждена запись cleanup ревьюеров"))?;
+    let mut discovered = Vec::new();
+    for p in members.iter().filter(|p| p["pane_id"] != r["pane"]) {
+        let id = s(p, "pane_id");
+        ensure!(
+            !id.is_empty() && !s(p, "terminal_id").is_empty(),
+            "Неизвестна идентичность дополнительной панели"
+        );
+        ensure!(
+            std::env::var("HERDR_PANE_ID").ok().as_deref() != Some(id),
+            "Нельзя закрыть текущую панель управляющего"
+        );
+        for other in c.runs()? {
+            ensure!(
+                other["id"] == r["id"]
+                    || other["herdr_namespace"] != r["herdr_namespace"]
+                    || other["pane"] != p["pane_id"]
+                    || ["done", "cancelled"].contains(&s(&other, "status")),
+                "Панель используется другим запуском"
+            );
+        }
+        let agent = c.herdr(&["agent", "get", id], r["herdr_session"].as_str())?;
+        let agent = &agent["agent"];
+        ensure!(
+            (["reviewer", "reviewr"].contains(&s(agent, "name"))
+                || ["reviewer", "reviewr"].contains(&s(p, "label")))
+                && !s(agent, "name").is_empty()
+                && agent["pane_id"] == p["pane_id"]
+                && agent["tab_id"] == r["tab"]
+                && agent["terminal_id"] == p["terminal_id"]
+                && !s(&agent["agent_session"], "value").is_empty(),
+            "В табе есть чужая или неподтверждённая панель; нужна сверка"
+        );
+        let identity = json!({"pane":id,"tab":r["tab"],"label":p["label"],"terminal_id":p["terminal_id"],"agent":{"name":agent["name"],"pane_id":agent["pane_id"],"tab_id":agent["tab_id"],"terminal_id":agent["terminal_id"],"agent_session":agent["agent_session"]},"foreground":crate::review::foreground_identity(c, r, id)?});
+        if let Some(old) = entries.iter().find(|e| e["pane"] == id) {
+            ensure!(
+                old == &identity,
+                "Панель ревьюера изменилась; чужая работа сохранена"
+            );
+        }
+        discovered.push(identity);
+    }
+    for p in members.iter().filter(|p| p["pane_id"] != r["pane"]) {
+        let id = s(p, "pane_id");
+        let agent = c.herdr(&["agent", "get", id], r["herdr_session"].as_str())?;
+        let live = &agent["agent"];
+        let identity = json!({"pane":id,"tab":r["tab"],"label":p["label"],"terminal_id":p["terminal_id"],"agent":{"name":live["name"],"pane_id":live["pane_id"],"tab_id":live["tab_id"],"terminal_id":live["terminal_id"],"agent_session":live["agent_session"]},"foreground":crate::review::foreground_identity(c, r, id)?});
+        ensure!(
+            discovered.iter().any(|item| item == &identity),
+            "Панель ревьюера изменилась; чужая работа сохранена"
+        );
+        if let Some(old) = saved["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["pane"] == id)
+        {
+            ensure!(
+                old == &identity,
+                "Панель ревьюера изменилась; чужая работа сохранена"
+            );
+        } else {
+            saved["panes"]
+                .as_array_mut()
+                .unwrap()
+                .push(identity.clone());
+            c.save(&file, &saved)?;
+        }
+        let current = c.herdr(
+            &["pane", "list", "--workspace", s(r, "workspace")],
+            r["herdr_session"].as_str(),
+        )?;
+        ensure!(
+            current["panes"]
+                .as_array()
+                .is_some_and(|ps| ps.iter().any(|x| x["pane_id"] == id
+                    && x["terminal_id"] == identity["terminal_id"]
+                    && x["label"] == identity["label"]
+                    && x["tab_id"] == r["tab"])),
+            "Панель ревьюера исчезла или изменилась; повторите complete"
+        );
+        let live = c.herdr(&["agent", "get", id], r["herdr_session"].as_str())?;
+        let live = &live["agent"];
+        ensure!(
+            live["name"] == identity["agent"]["name"]
+                && live["pane_id"] == identity["pane"]
+                && live["tab_id"] == identity["tab"]
+                && live["terminal_id"] == identity["terminal_id"]
+                && live["agent_session"] == identity["agent"]["agent_session"]
+                && crate::review::foreground_identity(c, r, id)? == identity["foreground"],
+            "Агент ревьюера изменился; чужая работа сохранена"
+        );
+        c.herdr(&["pane", "close", id], r["herdr_session"].as_str())?;
+        let all = c.herdr(&["pane", "list"], r["herdr_session"].as_str())?;
+        ensure!(
+            all["panes"].as_array().is_some_and(|ps| ps
+                .iter()
+                .all(|x| x["terminal_id"] != identity["terminal_id"])),
+            "Закрытие ревьюера не подтверждено"
+        );
+    }
+    // A disappeared pane must not have moved to another tab or workspace.
+    if !saved["panes"].as_array().unwrap().is_empty() {
+        let all = c.herdr(&["pane", "list"], r["herdr_session"].as_str())?;
+        ensure!(
+            all["panes"].as_array().is_some_and(|ps| saved["panes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|e| ps.iter().all(|p| p["terminal_id"] != e["terminal_id"]))),
+            "Терминал ревьюера ещё существует или перемещён"
+        );
+    }
+    Ok(())
+}
+
 // Only linked worktree workspaces belong to a run. Ordinary project and
 // repository-parent workspaces outlive tasks, even if a run claims their ID.
 fn workspace_cleanup_scope(c: &Context, r: &Value) -> Result<&'static str> {
@@ -1919,10 +2054,6 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
                     members.iter().any(|p| p["pane_id"] == r["pane"]),
                     "Сохранённая панель исполнителя отсутствует в табе; проверьте его вручную"
                 );
-                ensure!(
-                    members.iter().all(|p| p["pane_id"] == r["pane"]),
-                    "В табе есть другая панель; сначала отделите её от таба задачи"
-                );
                 require_terminal(
                     r,
                     members.iter().find(|p| p["pane_id"] == r["pane"]).unwrap(),
@@ -1936,6 +2067,9 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
                     );
                     return queue_completion(c, a, r);
                 }
+                close_unregistered_reviewers(c, r, &members)?;
+            } else {
+                close_unregistered_reviewers(c, r, &[])?;
             }
         }
     }

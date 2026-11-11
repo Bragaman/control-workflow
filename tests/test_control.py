@@ -119,7 +119,7 @@ elif a[:2] == ["pane", "list"]:
     if os.environ.get("FAKE_OTHER_SHELL"):
         r["panes"].append({"pane_id": "w7:p3", "tab_id": os.environ["FAKE_OTHER_SHELL"], "agent": None})
     if Path(os.environ['FAKE_LOG'] + '.review-created').exists() and not Path(os.environ['FAKE_LOG'] + '.review-closed').exists() and not os.environ.get('FAKE_REVIEW_MOVED'):
-        r['panes'].append({'pane_id': 'w7:p4', 'tab_id': 'w7:t1', 'terminal_id': os.environ.get('FAKE_REVIEW_TERMINAL', 'term_review')})
+        r['panes'].append({'pane_id': 'w7:p4', 'tab_id': 'w7:t1', 'terminal_id': os.environ.get('FAKE_REVIEW_TERMINAL', 'term_review'), 'label': os.environ.get('FAKE_REVIEW_LABEL')})
     if os.environ.get('FAKE_REVIEW_MOVED') and '--workspace' not in a:
         r['panes'].append({'pane_id': 'w9:p4', 'tab_id': 'w9:t1', 'terminal_id': 'term_review'})
 elif a[:2] == ["workspace", "close"]:
@@ -159,7 +159,7 @@ elif a[:2] == ['pane', 'close']:
     Path(os.environ['FAKE_LOG'] + '.review-closed').touch()
     r = {}
 elif a[:2] == ['agent', 'get'] and os.environ.get('FAKE_REVIEW_SPLIT'):
-    r = {'agent': {'name': a[2], 'pane_id': 'w7:p4', 'tab_id': 'w7:t1', 'terminal_id': 'term_review',
+    r = {'agent': {'name': os.environ.get('FAKE_REVIEW_NAME', a[2]), 'pane_id': 'w7:p4', 'tab_id': 'w7:t1', 'terminal_id': os.environ.get('FAKE_REVIEW_TERMINAL', 'term_review'),
                    'agent_session': {'kind': 'id', 'value': os.environ.get('FAKE_REVIEW_SESSION', 'original')}}}
 elif a[:2] == ["agent", "start"]:
     count = Path(os.environ["FAKE_LOG"] + ".process-count")
@@ -573,6 +573,43 @@ class ControlTests(unittest.TestCase):
         count = sum(c[:2] == ['pane', 'close'] for c in self.calls())
         self.cli('complete', 'task1')
         self.assertEqual(sum(c[:2] == ['pane', 'close'] for c in self.calls()), count)
+
+    def test_complete_unregistered_reviewer_before_git_and_retry(self):
+        for mode, status, name in [('main', 'done', 'reviewr'), ('branch', 'done', 'reviewer'), ('branch', 'cancelled', 'reviewr')]:
+            with self.subTest(mode=mode, status=status, name=name):
+                if mode != 'main':
+                    self.tearDown(); self.setUp()
+                repo, wt, r = self.code_review(remote=mode == 'branch', git_mode=mode)
+                self.env.update(FAKE_REVIEW_SPLIT='1', FAKE_REVIEW_PID=str(os.getpid()), FAKE_REVIEW_NAME='independent', FAKE_REVIEW_LABEL=name, FAKE_REVIEW_CLOSE_FAIL='after')
+                Path(str(self.log) + '.review-created').touch()
+                args = ['complete', 'task1', '--status', status, '--commit-message', 'Update task content']
+                self.cli(*args, ok=False)
+                self.assertEqual(self.cli('show', 'tasks', 'task1')['status'], 'review')
+                self.assertNotIn('git_completion', self.cli('run', r['id']))
+                self.env.pop('FAKE_REVIEW_CLOSE_FAIL')
+                self.assertEqual(self.cli(*args)['status'], status)
+                self.assertEqual(sum(c[:2] == ['pane', 'close'] for c in self.calls()), 1)
+                self.cli(*args)
+                self.assertEqual(sum(c[:2] == ['pane', 'close'] for c in self.calls()), 1)
+
+    def test_complete_unregistered_reviewer_does_not_close_foreign_or_replacement(self):
+        self.review()
+        self.env.update(FAKE_REVIEW_SPLIT='1', FAKE_REVIEW_PID=str(os.getpid()), FAKE_REVIEW_NAME='other')
+        Path(str(self.log) + '.review-created').touch()
+        self.cli('complete', 'task1', ok=False)
+        self.assertFalse(Path(str(self.log) + '.review-closed').exists())
+        self.env['FAKE_REVIEW_NAME'] = 'reviewr'
+        self.env['FAKE_REVIEW_CLOSE_FAIL'] = 'before'
+        self.cli('complete', 'task1', ok=False)
+        self.env.pop('FAKE_REVIEW_CLOSE_FAIL')
+        self.env['FAKE_REVIEW_TERMINAL'] = 'replacement'
+        self.cli('complete', 'task1', ok=False)
+        self.assertFalse(Path(str(self.log) + '.review-closed').exists())
+        self.assertEqual(self.cli('show', 'tasks', 'task1')['status'], 'review')
+        self.env.pop('FAKE_REVIEW_TERMINAL')
+        self.env['FAKE_REVIEW_MOVED'] = '1'
+        self.cli('complete', 'task1', ok=False)
+        self.assertEqual(self.cli('show', 'tasks', 'task1')['status'], 'review')
 
     def test_agent_review_legacy_prepared_delivery(self):
         r, a = self.agent_review_changes()

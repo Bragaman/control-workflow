@@ -341,7 +341,7 @@ fn automatic_returns(data: &Value) -> usize {
         .count()
 }
 
-fn foreground_identity(c: &Context, r: &Value, pane: &str) -> Result<Value> {
+pub(crate) fn foreground_identity(c: &Context, r: &Value, pane: &str) -> Result<Value> {
     let info = c.herdr(
         &["pane", "process-info", "--pane", pane],
         r["herdr_session"].as_str(),
