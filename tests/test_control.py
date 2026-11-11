@@ -2534,6 +2534,17 @@ class ControlTests(unittest.TestCase):
         self.assertTrue((self.root / "runs" / r["id"] / "result.md").exists())
         self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
 
+    def test_branch_completion_removes_worktree_with_ignored_files(self):
+        repo, wt, r = self.code_review(remote=True)
+        (wt / ".gitignore").write_text("private/\n")
+        (wt / "private").mkdir()
+        secret = wt / "private" / "local.txt"
+        secret.write_text("local data")
+        result = self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
+        self.assertEqual(result["status"], "done")
+        self.assertFalse(wt.exists())
+        self.assertFalse(secret.exists())
+
     def test_complete_push_rejection_retains_worktree_and_review_then_retries(self):
         repo, wt, r = self.code_review(remote=True)
         hook = self.root / "origin.git" / "hooks" / "pre-receive"

@@ -32,14 +32,41 @@
 выполняет работу и проверки. Для изменений кода он работает в отдельном Git
 worktree; чтение и применение готовых настроек выполняются без worktree.
 
+Основные переходы задачи (отмена возможна и из других состояний):
+
 ```mermaid
-flowchart LR
-    A[Цель и критерии] --> B[Выбор задачи пользователем]
-    B --> C[План и работа исполнителя]
-    C --> D[finish: результат в review]
-    D --> E[Проверка результата]
-    E -->|Доработка| C
-    E -->|Поручение пользователя| F[complete: приёмка]
+stateDiagram-v2
+    [*] --> backlog: task-create
+    backlog --> ready: task-set
+    backlog --> running: open
+    ready --> running: open
+    running --> blocked: block или ошибка запуска
+    blocked --> running: answer или восстановление
+    running --> review: finish
+    review --> ready: возврат на доработку
+    review --> done: complete или accept
+    review --> cancelled: отмена
+```
+
+Статус запуска хранится отдельно. При запуске task уже может быть running,
+пока run ещё launching; ошибка подготовки переводит task в blocked.
+
+```mermaid
+stateDiagram-v2
+    [*] --> launching: open
+    launching --> running: подтверждён старт
+    launching --> launch_failed: подтверждён отказ
+    launching --> launching: исход старта неизвестен
+    launch_failed --> running: recover-start после сверки
+    launching --> running: open после сверки
+    running --> blocked: block
+    blocked --> running: answer
+    running --> review: finish
+    launch_failed --> review: finish
+    review --> done: complete или accept
+    review --> interrupted: возврат задачи
+    running --> interrupted: interrupt
+    review --> cancelled: отмена
 ```
 
 План описывает оставшиеся шаги. Если работу нужно отложить, checkpoint сохраняет
