@@ -18,7 +18,7 @@ DOCS = ('worker', 'planning', 'control-entry', 'git-policy', 'recovery', 'runtim
 SKILLS = ('list', 'project', 'task', 'start', 'review', 'complete', 'git-publish', 'memory', 'sync')
 ALLOWLIST = ({'README.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', '.gitignore',
               'config/defaults.json', 'config/model-policy.json',
-              'pyproject.toml', 'requirements-dev.txt', 'scripts/check.sh',
+              'pyproject.toml', 'requirements-dev.txt', 'scripts/check.sh', 'scripts/check_release.py',
               'examples/config-codex.json', 'examples/config-claude.json',
               'examples/project.json', 'examples/task.md', '.github/workflows/check.yml',
               'skills/control-sync/references/checks.md'} |

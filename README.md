@@ -93,8 +93,9 @@ cargo build --locked --release
 target/release/control-workflow install --prefix "$HOME/.local/share/control-workflow/program"
 ```
 
-Готовая поставка работает без Python и Rust toolchain. Для обновления собери
-новый бинарник и повтори install с прежним prefix: установщик проверяет старые
+Готовые архивы Linux x86_64/ARM64 и macOS ARM64, а также SHA256SUMS доступны в [GitHub Releases](https://github.com/Bragaman/control-workflow/releases). Проверка суммы, установка и обновление с сохранением state/config/bindings описаны в [инструкции](docs/install.md). Пакеты macOS не подписаны и не notarized; Gatekeeper может блокировать запуск.
+
+Готовая поставка работает без Python и Rust toolchain. Для обновления запусти install из распакованного нового пакета с прежним prefix: установщик проверяет старые
 файлы, сохраняет backup и оставляет state/config/bindings на месте.
 [Пошаговая установка](docs/install.md) ведёт от установки зависимостей до новой
 сессии herdr и управляющего Codex с восемью скиллами и явно выбранным экземпляром.

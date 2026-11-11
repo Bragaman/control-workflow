@@ -68,6 +68,17 @@ class MCPControlTests(fixture.ControlTests):
         self.assertEqual(failed, not ok, result)
         return result
 
+    def concurrent_publish(self):
+        client = Client(fixture.BINARY, env=self.env)
+        try:
+            result, failed = client.call('git-publish', {
+                'id': 'task1', 'commit_message': 'Update task content',
+            })
+            self.assertFalse(failed, result)
+            return result
+        finally:
+            client.close()
+
     def test_mcp_protocol_and_schema_errors(self):
         names = {t['name'] for t in self.client.request('tools/list')['result']['tools']}
         self.assertTrue({'open', 'complete', 'review-request', 'memory-list'} <= names)

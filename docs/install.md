@@ -29,22 +29,30 @@ herdr --version
 
 ## Новый экземпляр с Codex
 
-Начни в корне проверенного checkout control-workflow. Команды ниже используют
-новые каталоги; если они уже заняты, выбери другие. Архив нужной ОС и архитектуры доступен в артефакте native-OS-ARCH
-workflow native-rust в CI репозитория: внутри лежит tar.gz и SHA256SUMS.
-Доступные артефакты: native-Linux-X64, native-Linux-ARM64 и native-macOS-ARM64.
-Сверь SHA-256 архива с SHA256SUMS и распакуй его в CW_PROGRAM; команды сборки и install
-ниже тогда пропусти. В одной оболочке выполни:
+Скачай архив для своей платформы и `SHA256SUMS` со страницы [Releases](https://github.com/Bragaman/control-workflow/releases). Названия содержат версию и платформу: `linux-x86_64`, `linux-aarch64` или `macos-aarch64`. Например, для Linux x86_64 (на macOS замени имя архива на `macos-aarch64`):
 
 ```sh
+export CW_VERSION=v0.1.0
+export CW_ARCHIVE="control-workflow-$CW_VERSION-linux-x86_64.tar.gz"
+curl -fLO "https://github.com/Bragaman/control-workflow/releases/download/$CW_VERSION/$CW_ARCHIVE"
+curl -fLO "https://github.com/Bragaman/control-workflow/releases/download/$CW_VERSION/SHA256SUMS"
+# Выполняй в каталоге с обоими файлами; работает и на macOS.
+grep "  $CW_ARCHIVE$" SHA256SUMS | shasum -a 256 -c -
+mkdir -p control-workflow-download
+tar -xzf "$CW_ARCHIVE" -C control-workflow-download
 export CW_PROGRAM="$HOME/.local/share/control-workflow/program"
+./control-workflow-download/bin/control-workflow install --prefix "$CW_PROGRAM"
+```
+
+Проверяй успешный результат `OK` до распаковки; сумма обнаруживает повреждение, но сама по себе не подтверждает авторство. Пакеты macOS не подписаны и не notarized: Gatekeeper может заблокировать запуск; разрешай запуск только после проверки источника и в соответствии с настройками своей системы. macOS Intel не поддерживается.
+
+Для сборки из исходников вместо загрузки выполни `cargo build --locked --release` и `target/release/control-workflow install --prefix "$CW_PROGRAM"` в checkout. Затем в той же оболочке выбери новые каталоги экземпляра:
+
+```sh
 export CW_STATE="$HOME/.local/state/control-workflow-demo"
 export CW_BINDINGS="$HOME/.local/state/control-workflow-demo-bindings"
 export CW_CONFIG="$HOME/.config/control-workflow-demo/config.json"
 export CW_MANAGER="$HOME/control-workflow-manager-demo"
-cargo build --locked --release
-cargo test --locked
-target/release/control-workflow install --prefix "$CW_PROGRAM"
 mkdir -p "$(dirname "$CW_CONFIG")" "$CW_MANAGER"
 cp "$CW_PROGRAM/examples/config-codex.json" "$CW_CONFIG"
 "$CW_PROGRAM/bin/control-workflow" --state-root "$CW_STATE" --bindings-root "$CW_BINDINGS" --config "$CW_CONFIG" doctor
@@ -114,7 +122,7 @@ herdr --session control-workflow-demo
 в отдельный каталог и вызови её `bin/control-workflow install --prefix PATH`
 с прежним prefix. При обновлении из исходников сначала собери новый бинарник
 и вызови `target/release/control-workflow install --prefix PATH`.
-Используй бинарник вне обновляемого каталога. Состояние и config не переносится.
+Используй бинарник вне обновляемого каталога. State, config и bindings остаются на прежних путях.
 Установщик сверяет хеши прежних управляемых файлов, отказывает при чужих файлах
 или ручных изменениях, готовит новую копию и сохраняет старую в backup,
 путь которого возвращает в JSON. Проверенные ссылки скиллов указывают на

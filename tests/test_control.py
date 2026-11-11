@@ -2581,12 +2581,14 @@ class ControlTests(unittest.TestCase):
         self.assertIn('passed', out['error'])
         self.assertEqual(self.git(wt, 'rev-parse', 'HEAD'), self.git(repo, 'rev-parse', 'HEAD'))
 
+    def concurrent_publish(self):
+        return self.cli('git-publish', 'task1', '--commit-message', 'Update task content')
+
     def test_publish_concurrent_requests_are_serialized(self):
         from concurrent.futures import ThreadPoolExecutor
         repo, wt, r = self.code_review()
         with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(lambda _: self.cli('git-publish', 'task1',
-                                '--commit-message', 'Update task content'), range(2)))
+            results = list(pool.map(lambda _: self.concurrent_publish(), range(2)))
         self.assertTrue(all(v['status'] == 'review' for v in results))
         self.assertEqual(self.git(wt, 'rev-list', '--count', 'HEAD'), '2')
 

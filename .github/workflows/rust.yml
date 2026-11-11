@@ -1,11 +1,19 @@
 name: native-rust
 on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
 jobs:
   native:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: ubuntu-24.04-arm
+            platform: linux-aarch64
+          - os: macos-15
+            platform: macos-aarch64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -19,13 +27,87 @@ jobs:
           components: rustfmt, clippy
       - run: python3 -m pip install -r requirements-dev.txt
       - run: sh scripts/check.sh
-      - run: target/release/control-workflow package --prefix "$RUNNER_TEMP/control-workflow-native"
-      - run: |
-          tar -czf control-workflow-${{ runner.os }}-${{ runner.arch }}.tar.gz -C "$RUNNER_TEMP/control-workflow-native" .
-          shasum -a 256 control-workflow-*.tar.gz > SHA256SUMS
+      - name: Validate release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/check_release.py "$RELEASE_TAG"
+      - name: Package and verify
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -eu
+          target/release/control-workflow package --prefix "$RUNNER_TEMP/package"
+          if [ "$IS_TAG" = true ]; then version="$RELEASE_TAG"; else version=ci; fi
+          archive="control-workflow-$version-$PLATFORM.tar.gz"
+          tar -czf "$archive" -C "$RUNNER_TEMP/package" .
+          mkdir "$RUNNER_TEMP/unpacked"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/unpacked"
+          python3 scripts/check_release.py --package "$RUNNER_TEMP/unpacked"
+          "$RUNNER_TEMP/unpacked/bin/control-workflow" install --prefix "$RUNNER_TEMP/verified"
+          "$RUNNER_TEMP/unpacked/bin/control-workflow" install --prefix "$RUNNER_TEMP/verified"
+          test "$("$RUNNER_TEMP/verified/bin/control-workflow" --version)" = "$(target/release/control-workflow --version)"
       - uses: actions/upload-artifact@v4
         with:
-          name: native-${{ runner.os }}-${{ runner.arch }}
-          path: |
-            control-workflow-*.tar.gz
-            SHA256SUMS
+          name: native-${{ matrix.platform }}
+          path: control-workflow-*.tar.gz
+          if-no-files-found: error
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: native
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: dist
+      - name: Publish verified draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          cd dist
+          for platform in linux-x86_64 linux-aarch64 macos-aarch64; do
+            test -f "control-workflow-$RELEASE_TAG-$platform.tar.gz"
+          done
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 3
+          sha256sum control-workflow-*.tar.gz > SHA256SUMS
+          test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$RELEASE_SHA"
+          # Include drafts: a retry must never adopt or modify an existing release.
+          existing=$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[].tag_name')
+          if printf '%s\n' "$existing" | grep -Fx -- "$RELEASE_TAG" >/dev/null; then
+            echo "Release already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          notes=(--generate-notes)
+          if [ "$RELEASE_TAG" = v0.1.0 ]; then
+            notes=(--notes 'Первый публичный выпуск control-workflow: CLI и MCP, управление задачами и штатная установка для Linux и macOS ARM64.')
+          fi
+          if [[ "$RELEASE_TAG" == *-rc.* ]]; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease --title "$RELEASE_TAG" "${notes[@]}"
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" "${notes[@]}"
+          fi
+          gh release upload "$RELEASE_TAG" control-workflow-*.tar.gz SHA256SUMS
+          mkdir downloaded
+          gh release download "$RELEASE_TAG" --dir downloaded
+          (cd downloaded && sha256sum -c ../SHA256SUMS)
+          cmp SHA256SUMS downloaded/SHA256SUMS
+          test "$(find downloaded -maxdepth 1 -type f | wc -l)" -eq 4
+          test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$RELEASE_SHA"
+          if [[ "$RELEASE_TAG" == *-rc.* ]]; then
+            gh release edit "$RELEASE_TAG" --draft=false --latest=false
+          else
+            gh release edit "$RELEASE_TAG" --draft=false --latest
+          fi
