@@ -1578,6 +1578,34 @@ fn saved_tab(c: &Context, r: &Value) -> Result<Option<Value>> {
     }
 }
 
+fn unregistered_reviewer_identity(c: &Context, r: &Value, p: &Value) -> Result<Value> {
+    let id = s(p, "pane_id");
+    let agent = match c.herdr(&["agent", "get", id], r["herdr_session"].as_str()) {
+        Ok(v) => {
+            let agent = &v["agent"];
+            ensure!(
+                !s(agent, "name").is_empty()
+                    && agent["pane_id"] == p["pane_id"]
+                    && agent["tab_id"] == r["tab"]
+                    && agent["terminal_id"] == p["terminal_id"]
+                    && !s(&agent["agent_session"], "value").is_empty(),
+                "Агент в панели ревьюера не подтверждён; чужая работа сохранена"
+            );
+            json!({"name":agent["name"],"pane_id":agent["pane_id"],"tab_id":agent["tab_id"],"terminal_id":agent["terminal_id"],"agent_session":agent["agent_session"]})
+        }
+        Err(e) if error_code(&e) == "agent_not_found" => Value::Null,
+        Err(e) => return Err(e),
+    };
+    ensure!(
+        ["reviewer", "reviewr"].contains(&s(&agent, "name"))
+            || ["reviewer", "reviewr"].contains(&s(p, "label")),
+        "В табе есть чужая или неподтверждённая панель; нужна сверка"
+    );
+    Ok(
+        json!({"pane":id,"tab":r["tab"],"label":p["label"],"terminal_id":p["terminal_id"],"agent":agent,"foreground":crate::review::process_identity(c, r, id, agent.is_null())?}),
+    )
+}
+
 // Persist the identity before closing, so a retry cannot adopt a replacement.
 fn close_unregistered_reviewers(c: &Context, r: &Value, members: &[&Value]) -> Result<()> {
     let file = c
@@ -1618,19 +1646,7 @@ fn close_unregistered_reviewers(c: &Context, r: &Value, members: &[&Value]) -> R
                 "Панель используется другим запуском"
             );
         }
-        let agent = c.herdr(&["agent", "get", id], r["herdr_session"].as_str())?;
-        let agent = &agent["agent"];
-        ensure!(
-            (["reviewer", "reviewr"].contains(&s(agent, "name"))
-                || ["reviewer", "reviewr"].contains(&s(p, "label")))
-                && !s(agent, "name").is_empty()
-                && agent["pane_id"] == p["pane_id"]
-                && agent["tab_id"] == r["tab"]
-                && agent["terminal_id"] == p["terminal_id"]
-                && !s(&agent["agent_session"], "value").is_empty(),
-            "В табе есть чужая или неподтверждённая панель; нужна сверка"
-        );
-        let identity = json!({"pane":id,"tab":r["tab"],"label":p["label"],"terminal_id":p["terminal_id"],"agent":{"name":agent["name"],"pane_id":agent["pane_id"],"tab_id":agent["tab_id"],"terminal_id":agent["terminal_id"],"agent_session":agent["agent_session"]},"foreground":crate::review::foreground_identity(c, r, id)?});
+        let identity = unregistered_reviewer_identity(c, r, p)?;
         if let Some(old) = entries.iter().find(|e| e["pane"] == id) {
             ensure!(
                 old == &identity,
@@ -1641,9 +1657,7 @@ fn close_unregistered_reviewers(c: &Context, r: &Value, members: &[&Value]) -> R
     }
     for p in members.iter().filter(|p| p["pane_id"] != r["pane"]) {
         let id = s(p, "pane_id");
-        let agent = c.herdr(&["agent", "get", id], r["herdr_session"].as_str())?;
-        let live = &agent["agent"];
-        let identity = json!({"pane":id,"tab":r["tab"],"label":p["label"],"terminal_id":p["terminal_id"],"agent":{"name":live["name"],"pane_id":live["pane_id"],"tab_id":live["tab_id"],"terminal_id":live["terminal_id"],"agent_session":live["agent_session"]},"foreground":crate::review::foreground_identity(c, r, id)?});
+        let identity = unregistered_reviewer_identity(c, r, p)?;
         ensure!(
             discovered.iter().any(|item| item == &identity),
             "Панель ревьюера изменилась; чужая работа сохранена"
@@ -1678,15 +1692,8 @@ fn close_unregistered_reviewers(c: &Context, r: &Value, members: &[&Value]) -> R
                     && x["tab_id"] == r["tab"])),
             "Панель ревьюера исчезла или изменилась; повторите complete"
         );
-        let live = c.herdr(&["agent", "get", id], r["herdr_session"].as_str())?;
-        let live = &live["agent"];
         ensure!(
-            live["name"] == identity["agent"]["name"]
-                && live["pane_id"] == identity["pane"]
-                && live["tab_id"] == identity["tab"]
-                && live["terminal_id"] == identity["terminal_id"]
-                && live["agent_session"] == identity["agent"]["agent_session"]
-                && crate::review::foreground_identity(c, r, id)? == identity["foreground"],
+            unregistered_reviewer_identity(c, r, p)? == identity,
             "Агент ревьюера изменился; чужая работа сохранена"
         );
         c.herdr(&["pane", "close", id], r["herdr_session"].as_str())?;

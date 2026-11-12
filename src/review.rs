@@ -342,6 +342,16 @@ fn automatic_returns(data: &Value) -> usize {
 }
 
 pub(crate) fn foreground_identity(c: &Context, r: &Value, pane: &str) -> Result<Value> {
+    process_identity(c, r, pane, false)
+}
+
+// Legacy reviewer panes can contain a shell after the agent has exited.
+pub(crate) fn process_identity(
+    c: &Context,
+    r: &Value,
+    pane: &str,
+    allow_shell: bool,
+) -> Result<Value> {
     let info = c.herdr(
         &["pane", "process-info", "--pane", pane],
         r["herdr_session"].as_str(),
@@ -354,7 +364,7 @@ pub(crate) fn foreground_identity(c: &Context, r: &Value, pane: &str) -> Result<
     ensure!(
         process["pane_id"] == pane
             && group > 0
-            && process["shell_pid"] != group
+            && (allow_shell || process["shell_pid"] != group)
             && members.iter().any(|p| p["pid"] == group),
         "Не подтверждён foreground процесс ревьюера"
     );
