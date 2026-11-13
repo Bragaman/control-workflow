@@ -744,7 +744,7 @@
           "--agent-review-policy"
         ],
         "required": false,
-        "default": "manual",
+        "default": "auto",
         "choices": [
           "off",
           "manual",

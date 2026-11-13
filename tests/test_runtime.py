@@ -41,7 +41,8 @@ class RuntimeTests(unittest.TestCase):
         prefix = ['--config', str(config), '--state-root', str(state), '--bindings-root', str(bindings)]
         self.cli(*prefix, 'project-create', 'lab', '--name', 'Другой экземпляр')
         task = self.cli(*prefix, 'task-create', 'task2', '--project', 'lab', '--title', 'Проверка',
-                        '--goal', 'Проверка', '--acceptance', 'Проверка', '--no-code', '--task-kind', 'implementation')
+                        '--goal', 'Проверка', '--acceptance', 'Проверка', '--no-code', '--task-kind', 'implementation',
+                        '--agent-review-policy', 'manual')
         self.assertEqual(task['git_mode'], 'branch')
         self.assertEqual(task['model'], 'configured-model')
         run = self.cli(*prefix, 'open', 'task2')[0]['run']

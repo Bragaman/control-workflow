@@ -79,6 +79,17 @@ class MCPControlTests(fixture.ControlTests):
         finally:
             client.close()
 
+    def test_task_create_omitted_policy_over_mcp(self):
+        self.cli('projects')  # Initialize the client.
+        for key, policy in [('omitted', None), ('manual', 'manual'), ('off', 'off')]:
+            args = {'id': key, 'project': 'lab', 'title': 'Test', 'goal': 'Check', 'acceptance': 'Pass'}
+            if policy is not None:
+                args['agent_review_policy'] = policy
+            task, failed = self.client.call('task-create', args)
+            self.assertFalse(failed, task)
+            self.assertEqual(task['agent_review_policy'], policy or 'auto')
+            self.assertEqual(task['reviewer'], 'user')
+
     def test_mcp_protocol_and_schema_errors(self):
         names = {t['name'] for t in self.client.request('tools/list')['result']['tools']}
         self.assertTrue({'open', 'complete', 'review-request', 'memory-list'} <= names)

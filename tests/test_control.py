@@ -915,6 +915,26 @@ class ControlTests(unittest.TestCase):
         b = self.cli("review-request", "--run", r["id"], "--user-requested")
         self.assertNotEqual(a["id"], b["id"])
 
+    def test_task_create_review_defaults_and_explicit_exceptions(self):
+        for key, extra, expected in [('default', (), 'auto'),
+                                     ('manual', ('--agent-review-policy', 'manual'), 'manual'),
+                                     ('off', ('--agent-review-policy', 'off'), 'off')]:
+            task = self.create(key, *extra)
+            self.assertEqual(task['agent_review_policy'], expected)
+            self.assertEqual(task['reviewer'], 'user')
+
+    def test_legacy_missing_review_policy_stays_manual(self):
+        self.create('task1')
+        path = self.root / 'tasks/task1.json'
+        task = json.loads(path.read_text()); task.pop('agent_review_policy'); path.write_text(json.dumps(task))
+        r = self.start()
+        self.assertIn('manual', (self.root / 'runs' / r['id'] / 'assignment.md').read_text())
+        report = self.root / 'legacy-report.md'; report.write_text('Legacy result')
+        out = self.cli('finish', '--run', r['id'], '--report', str(report))
+        self.assertIsNone(out['agent_review'])
+        self.assertNotIn('agent_review_policy', json.loads(path.read_text()))
+        self.assertEqual(self.cli('show', 'tasks', 'task1')['status'], 'review')
+
     def test_agent_review_auto_finish_artifacts(self):
         self.create("task1", "--agent-review-policy", "auto")
         r = self.start()
@@ -928,7 +948,7 @@ class ControlTests(unittest.TestCase):
         self.assertTrue(self.cli("review-show", "--run", r["id"])["attempts"][-1]["stale"])
 
     def test_auto_review_handoff_waits_for_independent_verdict(self):
-        self.create('task1', '--agent-review-policy', 'auto')
+        self.create('task1')
         r = self.start()
         report = self.root / 'report.md'; report.write_text('Ready for review')
         out = self.cli('finish', '--run', r['id'], '--report', str(report))
@@ -945,6 +965,7 @@ class ControlTests(unittest.TestCase):
                        '--actor', 'fresh-reviewer', '--result', str(verdict))
         self.assertTrue(out['handoff']['ready_for_user'])
         self.assertEqual(self.cli('show', 'tasks', 'task1')['status'], 'review')
+        self.assertEqual(self.cli('show', 'tasks', 'task1')['reviewer'], 'user')
         self.assertEqual(sum(n['title'].startswith('Готово к приёмке') for n in self.cli('notifications')), 1)
 
     def test_auto_review_failed_and_exhausted_cycles_never_report_ready(self):
@@ -2298,7 +2319,8 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.cli("show", "tasks", "task1")["status"], "review")
         self.assertEqual((self.root / "runs" / run["id"] / "result.md").read_text(), report.read_text())
         self.assertEqual(len(self.cli("memory-list", "--project", "lab")), 1)
-        self.assertTrue(any(n["title"].startswith("Готово к приёмке:") for n in self.cli("notifications")))
+        self.assertFalse(any(n["title"].startswith("Готово к приёмке:") for n in self.cli("notifications")))
+        self.assertEqual(self.cli("review-show", "--run", run["id"])["attempts"][-1]["status"], "pending")
         self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 1)
 
     def test_finish_rejects_inactive_and_closed_runs(self):
@@ -2319,7 +2341,7 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.cli("show", "tasks", "task1")["status"], "cancelled")
 
     def test_finish_memory_and_delegated_acceptance(self):
-        self.create()
+        self.create("task1", "--agent-review-policy", "manual")
         r = self.start()
         report = self.root / "report.md"
         report.write_text("Изменения проверены. Ограничения описаны.")
@@ -2337,7 +2359,8 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.cli("notifications"), [])
 
     def review(self):
-        self.create()
+        # Manual lifecycle tests request review explicitly.
+        self.create("task1", "--agent-review-policy", "manual")
         r = self.start()
         report = self.root / "report.md"
         report.write_text("Проверенный результат")
@@ -2531,7 +2554,7 @@ class ControlTests(unittest.TestCase):
             self.git(origin, "init", "--bare", "-b", "main")
             self.git(repo, "remote", "add", "origin", str(origin))
             self.git(repo, "push", "-u", "origin", "main")
-        self.create("task1", "--code", "--repo", str(repo), "--git-mode", git_mode or ("branch" if remote else "main"))
+        self.create("task1", "--code", "--repo", str(repo), "--git-mode", git_mode or ("branch" if remote else "main"), "--agent-review-policy", "manual")
         r = self.start()
         wt = Path(r["worktrees"][0]["path"])
         (wt / "example.txt").write_text("task change")
@@ -3214,7 +3237,7 @@ class ControlTests(unittest.TestCase):
 
     def test_two_main_tasks_from_same_base_merge_and_push_both(self):
         repo, wt, r = self.code_review(remote=True, git_mode="main")
-        self.create("task2", "--code", "--repo", str(repo), "--git-mode", "main")
+        self.create("task2", "--code", "--repo", str(repo), "--git-mode", "main", "--agent-review-policy", "manual")
         self.env['FAKE_WORKSPACE_ID'] = 'w9'
         second = self.start("task2")
         self.assertNotEqual(r['workspace'], second['workspace'])

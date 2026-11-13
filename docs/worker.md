@@ -136,7 +136,9 @@ finish --run RUN_ID --report /path/report.md --decisions /path/decisions.md
 Если инструмент subagent недоступен, сохрани failed с этой причиной.
 Отдельная копия через memory-add не нужна. Для незавершённой работы сохраняй checkpoint.
 
-Самостоятельный finish оставляет review. Принимать и закрывать через complete
+Новые задачи по умолчанию используют auto, а их приёмщик — user.
+Самостоятельный finish и passed оставляют review; они не разрешают merge, push
+или complete. Принимать и закрывать через complete
 можно только по явному поручению пользователя: тогда прочитай
 [control-complete](../skills/control-complete/SKILL.md) и
 [git-policy.md](git-policy.md). Сохранение артефактов не означает приёмку.

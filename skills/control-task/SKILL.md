@@ -17,6 +17,8 @@ description: Создать или изменить задачу контрол�
 переопределяет репозитории проекта; --depends задаёт зависимости.
 Для --code Git-режим выбери по [git-policy.md](../../docs/git-policy.md).
 Приёмщик по умолчанию user; делегирование требует явного поручения.
+Для новой задачи агентское ревью по умолчанию auto; manual и off задаются
+явно через --agent-review-policy как исключения. Auto не меняет приёмщика.
 
 Редактирование: task-set ID --goal '...' --acceptance '...' --status ready --compact;
 тип/сложность — --task-kind и --complexity; профиль — --profile NAME.
