@@ -171,6 +171,11 @@ elif a[:2] == ['pane', 'close']:
         sys.exit(1)
     Path(os.environ['FAKE_LOG'] + '.review-closed').touch()
     r = {}
+elif a[:2] == ['agent', 'get'] and os.environ.get('FAKE_WORKER_SESSION'):
+    r = {'agent': {'name': a[2], 'agent': 'codex', 'pane_id': 'w7:p1', 'tab_id': 'w7:t1',
+                   'terminal_id': os.environ.get('FAKE_WORKER_TERMINAL', 'term_original'),
+                   'agent_session': {'agent': 'codex', 'kind': 'id', 'source': 'herdr:codex',
+                                     'value': os.environ['FAKE_WORKER_SESSION']}}}
 elif a[:2] == ['agent', 'get'] and os.environ.get('FAKE_REVIEW_SPLIT'):
     if os.environ.get('FAKE_REVIEW_AGENT_ERROR'):
         print(json.dumps({'error': {'code': os.environ['FAKE_REVIEW_AGENT_ERROR']}}), file=sys.stderr)
@@ -2338,6 +2343,73 @@ class ControlTests(unittest.TestCase):
         report.write_text("Проверенный результат")
         self.cli("finish", "--run", r["id"], "--report", str(report))
         return r
+
+    def test_compact_result_exposes_later_report_and_historical_timeout(self):
+        r = self.review()
+        directory = self.root / 'runs' / r['id']
+        (directory / 'report.md').write_text('Проверенный результат\n\n## Выпуск\nОпубликовано и проверено.\n')
+        state_file = directory / 'state.json'
+        state = json.loads(state_file.read_text())
+        state['startup_error'] = 'timeout'
+        state_file.write_text(json.dumps(state))
+        compact = self.cli('run', r['id'], '--compact')
+        self.assertNotIn('startup_error', compact)
+        self.assertEqual(compact['historical_startup_error'], 'timeout')
+        self.assertIn('Опубликовано и проверено.', compact['result_summary']['latest_report_section'])
+        self.assertEqual(compact['result_summary']['report'], str(directory / 'report.md'))
+
+    def test_cancelled_unconfirmed_start_error_is_not_historical(self):
+        self.create()
+        self.env['FAKE_FAIL'] = '1'
+        first = self.cli('open', 'task1')[0]
+        self.wait_run(first['run'], 'launch_failed')
+        state_file = self.root / 'runs' / first['run'] / 'state.json'
+        state = json.loads(state_file.read_text())
+        state['startup_error'] = 'timeout'
+        state_file.write_text(json.dumps(state))
+        self.cli('complete', 'task1', '--status', 'cancelled')
+        compact = self.cli('run', first['run'], '--compact')
+        self.assertIsNone(compact['historical_startup_error'])
+        self.assertEqual(compact['current_startup_error'], 'timeout')
+
+    def test_session_capture_requires_matching_terminal(self):
+        if self.env.get('FAKE_KIND') == 'claude':
+            self.skipTest('Codex-specific capture')
+        self.create()
+        self.env['FAKE_WORKER_SESSION'] = 'confirmed-thread'
+        r = self.start()
+        self.assertEqual(r['agent_session']['value'], 'confirmed-thread')
+        self.assertFalse(r['capabilities']['resume_by_id'])
+
+    def test_compact_result_after_repeat_complete_keeps_evidence(self):
+        r = self.review()
+        directory = self.root / 'runs' / r['id']
+        (directory / 'current-result.md').write_text('Установлено; проверка: evidence.json')
+        self.cli('complete', 'task1', '--note', 'Принято')
+        self.cli('complete', 'task1')
+        summary = self.cli('run', r['id'], '--compact')['result_summary']
+        self.assertEqual(summary['acceptance']['note'], 'Принято')
+        self.assertIn('evidence.json', summary['current_result_text'])
+        self.assertEqual(Path(summary['development_result']).read_text(), 'Проверенный результат')
+        self.assertEqual(self.cli('open', 'task1')[0]['result_summary'], summary)
+
+    def test_session_capture_does_not_adopt_replaced_terminal(self):
+        if self.env.get('FAKE_KIND') == 'claude':
+            self.skipTest('Codex-specific capture')
+        self.create()
+        self.env.update(FAKE_WORKER_SESSION='foreign-thread', FAKE_WORKER_TERMINAL='different')
+        r = self.start()
+        self.assertNotIn('agent_session', r)
+
+    def test_session_capture_can_be_confirmed_on_reopen(self):
+        if self.env.get('FAKE_KIND') == 'claude':
+            self.skipTest('Codex-specific capture')
+        self.create()
+        r = self.start()
+        self.assertNotIn('agent_session', r)
+        self.env.update(FAKE_LIVE='1', FAKE_AUTO_ASSIGNMENT='1', FAKE_WORKER_SESSION='late-thread')
+        self.cli('open', 'task1')
+        self.assertEqual(self.cli('run', r['id'])['agent_session']['value'], 'late-thread')
 
     def legacy_ready_review(self, with_review=False):
         # Existing installations can contain this state after task-set --status ready.

@@ -10,15 +10,18 @@ use std::{fs, io::Write, path::Path};
 
 // Shared, observational context; null means that the run did not record it.
 pub fn run_context(r: &Value) -> Value {
+    let confirmed = r["agent_start_completed"] == true
+        || ["running", "review", "done"].contains(&s(r, "status"));
     json!({
         "machine": r["herdr_namespace"]["machine"],
         "herdr_session": r["herdr_session"],
         "cwd": r["cwd"],
         "stage": r["status"],
         "last_action": r["progress"],
-        "startup_error_kind": if r["startup_error"].is_null() { Value::Null } else if r["status"] == "launch_failed" || r["status"] == "launching" { json!("current") } else { json!("historical") },
-        "current_startup_error": if r["status"] == "launch_failed" || r["status"] == "launching" { r["startup_error"].clone() } else { Value::Null },
-        "historical_startup_error": if r["status"] == "launch_failed" || r["status"] == "launching" { Value::Null } else { r["startup_error"].clone() },
+        "startup_error_kind": if r["startup_error"].is_null() { Value::Null } else if confirmed { json!("historical") } else { json!("current") },
+        "current_startup_error": if confirmed { Value::Null } else { r["startup_error"].clone() },
+        "historical_startup_error": if confirmed { r["startup_error"].clone() } else { Value::Null },
+        "session_capture_status": if !r["agent_session"].is_null() { "captured" } else if r["capabilities"]["session_id_capture"] == true { "unconfirmed" } else { "unsupported" },
     })
 }
 pub fn profile(c: &Context, t: &Value) -> Result<Value> {
@@ -86,6 +89,42 @@ fn task_response(t: Value, compact: bool) -> Value {
     );
     v["details"] = json!(format!("show tasks {}", s(&t, "id")));
     v
+}
+pub(crate) fn result_summary(c: &Context, r: &Value) -> Result<Value> {
+    let dir = c.run_file(s(r, "id"))?.parent().unwrap().to_path_buf();
+    let task = c.task(s(r, "task"))?;
+    let acceptance = if task["active_run"] == r["id"] {
+        task["accepted"].clone()
+    } else {
+        Value::Null
+    };
+    let mut summary = json!({"development_result":null,"acceptance":acceptance,
+        "git_publication":r["git_completion"],"deployment":"см. текущую сводку или отчёт; автоматически не определено",
+        "checks":"см. текущую сводку или отчёт и свидетельства"});
+    let result = dir.join("result.md");
+    if result.is_file() {
+        summary["development_result"] = json!(result);
+    }
+    let report = dir.join("report.md");
+    if report.is_file() {
+        let contents = fs::read_to_string(&report)?;
+        let section = contents
+            .rfind("\n## ")
+            .map(|i| &contents[i + 1..])
+            .unwrap_or(&contents);
+        let excerpt: String = section.chars().take(4000).collect();
+        summary["report"] = json!(report);
+        summary["latest_report_section"] = json!(excerpt);
+        summary["latest_report_section_truncated"] = json!(section.chars().count() > 4000);
+    }
+    let current = dir.join("current-result.md");
+    if current.is_file() {
+        let contents = fs::read_to_string(&current)?;
+        summary["current_result"] = json!(current);
+        summary["current_result_text"] = json!(contents.chars().take(4000).collect::<String>());
+        summary["current_result_truncated"] = json!(contents.chars().count() > 4000);
+    }
+    Ok(summary)
 }
 /// Executes one command. Multi-step lifecycle operations own their lock scopes.
 pub fn execute(c: &Context, name: &str, a: &Value) -> Result<Value> {
@@ -357,15 +396,19 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
                         "launcher_alive",
                         "launcher_status",
                         "worktree_mutation_status",
+                        "agent_session",
+                        "capabilities",
                         "launcher_diagnostic",
                         "seconds_since_update",
                         "completion_process_alive",
                         "error",
-                        "startup_error",
                         "note",
                     ],
                 );
                 extend(&mut v, run_context(&r));
+                if ["review", "done", "cancelled"].contains(&s(&r, "status")) {
+                    v["result_summary"] = result_summary(c, &r)?;
+                }
                 v["details"] = json!(format!("run {id}"));
                 v["files"] = json!({});
                 for n in [
@@ -381,6 +424,11 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
                 }
                 Ok(v)
             } else {
+                let context = run_context(&r);
+                extend(&mut r, context);
+                if ["review", "done", "cancelled"].contains(&s(&r, "status")) {
+                    r["result_summary"] = result_summary(c, &r)?;
+                }
                 Ok(r)
             }
         }
