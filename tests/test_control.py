@@ -2547,7 +2547,7 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(result['cleanup']['workspace_status'], 'closed')
         self.assertEqual([c for c in self.calls() if c[:2] == ['workspace', 'close']],
                          [['workspace', 'close', r['workspace']]])
-        self.assertTrue(wt.exists())  # Retained Git worktree is independent of Herdr layout.
+        self.assertFalse(wt.exists())
         self.assertTrue(repo.exists())
         self.cli('complete', 'task1')
         self.assertEqual(sum(c[:2] == ['workspace', 'close'] for c in self.calls()), 1)
@@ -2568,7 +2568,7 @@ class ControlTests(unittest.TestCase):
         self.cli('complete', 'task1', '--commit-message', 'Update task content', ok=False)
         self.assertEqual(self.cli('show', 'tasks', 'task1')['status'], 'review')
         self.env['FAKE_OTHER_SHELL'] = 'another-tab'
-        out = self.cli('complete', 'task1', '--commit-message', 'Update task content')
+        out = self.cli('complete', 'task1', '--keep-worktree', '--commit-message', 'Update task content')
         self.assertEqual(out['cleanup']['workspace_status'], 'preserved_foreign_panes')
         self.assertFalse(any(c[:2] == ['workspace', 'close'] for c in self.calls()))
 
@@ -2611,6 +2611,7 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.cli('complete', 'task1')['status'], 'done')
         self.assertEqual(sum(c[:2] == ['workspace', 'close'] for c in self.calls()), 1)
         self.assertEqual(self.calls(raw=True), before)
+        wt.mkdir(exist_ok=True)
         (wt / 'new-user-work.txt').write_text('unrelated user work')
         self.assertEqual(self.cli('complete', 'task1')['status'], 'done')
         self.assertEqual(self.calls(raw=True), before)
@@ -2862,7 +2863,7 @@ class ControlTests(unittest.TestCase):
         before = self.git(wt, "rev-parse", "HEAD")
         self.cli("complete", "task1")
         self.assertEqual(self.git(repo, "rev-parse", "HEAD"), before)
-        self.assertEqual(self.git(wt, "rev-parse", "HEAD"), before)
+        self.assertFalse(wt.exists())
 
     def test_complete_without_origin_commits_and_merges_main(self):
         repo, wt, r = self.code_review()
@@ -2871,7 +2872,7 @@ class ControlTests(unittest.TestCase):
         self.assertEqual((repo / "example.txt").read_text(), "task change")
         self.assertEqual((repo / "added.txt").read_text(), "task artifact")
         self.assertEqual(self.git(repo, "status", "--porcelain"), "")
-        self.assertTrue(wt.exists())
+        self.assertFalse(wt.exists())
         head = self.git(repo, "rev-parse", "HEAD")
         self.assertEqual(self.git(repo, "log", "-1", "--format=%s"),
                          "Update example content and add task artifact")
@@ -2894,16 +2895,242 @@ class ControlTests(unittest.TestCase):
         self.assertTrue((self.root / "runs" / r["id"] / "result.md").exists())
         self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
 
-    def test_branch_completion_removes_worktree_with_ignored_files(self):
+    def test_branch_completion_preserves_worktree_with_ignored_files(self):
         repo, wt, r = self.code_review(remote=True)
         (wt / ".gitignore").write_text("private/\n")
         (wt / "private").mkdir()
         secret = wt / "private" / "local.txt"
         secret.write_text("local data")
-        result = self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
-        self.assertEqual(result["status"], "done")
+        result = self.cli("complete", "task1", "--commit-message", "Update task content", ok=False)
+        self.assertEqual(result["status"], "review")
+        self.assertIn("private/local.txt", result["worktree_cleanup"]["error"])
+        self.assertTrue(wt.exists())
+        self.assertEqual(secret.read_text(), "local data")
+        self.assertFalse(Path(str(self.log) + ".workspace-closed").exists())
+        head = self.git(wt, "rev-parse", "HEAD")
+        self.cli("complete", "task1", "--keep-worktree")
+        self.assertTrue(wt.exists())
+        self.assertEqual(self.git(wt, "rev-parse", "HEAD"), head)
+        state = self.cli("run", r["id"])
+        self.assertTrue(state["worktree_cleanup"]["keep"])
+        self.assertTrue(state["git_completion"]["repositories"][0]["kept"])
+
+    def test_complete_cleanup_matrix_and_keep_exception(self):
+        # Other matrix combinations are covered by the existing main/branch tests.
+        repo, wt, r = self.code_review(remote=False, git_mode="branch")
+        self.cli("complete", "task1", "--commit-message", "Save local branch")
         self.assertFalse(wt.exists())
-        self.assertFalse(secret.exists())
+        self.assertEqual((repo / "added.txt").read_text(), "task artifact")
+        self.assertTrue(self.cli("run", r["id"])["git_completion"]["repositories"][0]["removed"])
+
+    def test_complete_keep_worktree_is_durable(self):
+        repo, wt, r = self.code_review()
+        self.cli("complete", "task1", "--keep-worktree", "--commit-message", "Save task changes")
+        state = self.cli("run", r["id"])
+        self.assertEqual(state["worktree_cleanup"]["status"], "completed")
+        self.assertTrue(state["worktree_cleanup"]["keep"])
+        self.cli("complete", "task1")
+        self.assertTrue(wt.exists())
+        self.assertTrue(state["git_completion"]["repositories"][0]["kept"])
+
+    def test_complete_blocks_external_cwd_and_retries_without_push(self):
+        repo, wt, r = self.code_review(remote=True, git_mode="main")
+        hook = self.root / "origin.git/hooks/pre-receive"
+        counter = self.root / "push-count"
+        hook.write_text("#!/bin/sh\necho push >> " + shlex.quote(str(counter)) + "\n")
+        hook.chmod(0o755)
+        proc = subprocess.Popen(["sleep", "60"], cwd=wt)
+        try:
+            result = self.cli("complete", "task1", "--commit-message", "Save task changes", ok=False)
+            self.assertIn(str(proc.pid), result["worktree_cleanup"]["error"])
+            self.assertTrue(wt.exists())
+            self.assertEqual(result["git_completion"]["status"], "completed")
+            commit = self.git(wt, "rev-parse", "HEAD")
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+        self.cli("complete", "task1")
+        self.assertFalse(wt.exists())
+        self.assertEqual(counter.read_text().splitlines(), ["push"])
+        self.assertEqual(self.git(repo, "rev-parse", r["worktrees"][0]["branch"]), commit)
+
+    def test_complete_remove_failure_retries_only_removal(self):
+        repo, wt, r = self.code_review()
+        self.git(repo, "worktree", "lock", str(wt))
+        result = self.cli("complete", "task1", "--commit-message", "Save task changes", ok=False)
+        self.assertEqual(result["worktree_cleanup"]["status"], "failed")
+        state = self.cli("run", r["id"])
+        self.assertTrue(state["git_completion"]["repositories"][0]["removal_pending"])
+        self.assertFalse(Path(str(self.log) + ".workspace-closed").exists())
+        commit = self.git(wt, "rev-parse", "HEAD")
+        self.git(repo, "worktree", "unlock", str(wt))
+        self.cli("complete", "task1")
+        self.assertFalse(wt.exists())
+        self.assertEqual(self.git(repo, "rev-parse", "HEAD"), commit)
+
+    def test_complete_secret_settings_are_never_staged(self):
+        repo, wt, r = self.code_review()
+        (wt / ".env").write_text("LOCAL_SETTING=value")
+        head = self.git(wt, "rev-parse", "HEAD")
+        result = self.cli("complete", "task1", "--commit-message", "Save task changes", ok=False)
+        self.assertIn(".env", result["git_completion"]["error"])
+        self.assertEqual(self.git(wt, "rev-parse", "HEAD"), head)
+        self.assertEqual(self.git(wt, "diff", "--cached", "--name-only"), "")
+        self.assertTrue(wt.exists())
+
+    def test_complete_changed_tree_after_cleanup_failure_is_not_committed(self):
+        repo, wt, r = self.code_review()
+        self.git(repo, "worktree", "lock", str(wt))
+        self.cli("complete", "task1", "--commit-message", "Save task changes", ok=False)
+        head = self.git(wt, "rev-parse", "HEAD")
+        self.git(repo, "worktree", "unlock", str(wt))
+        (wt / "added.txt").write_text("new unreviewed changes")
+        result = self.cli("complete", "task1", "--commit-message", "Must not create a commit", ok=False)
+        self.assertIn("Git", result["worktree_cleanup"]["error"])
+        self.assertEqual(self.git(wt, "rev-parse", "HEAD"), head)
+        self.assertEqual((wt / "added.txt").read_text(), "new unreviewed changes")
+
+    def test_complete_multi_repository_preflight_and_partial_removal_retry(self):
+        repo, wt, r = self.code_review()
+        second = self.root / "second"
+        self.git(self.root, "clone", str(repo), str(second))
+        self.git(second, "remote", "remove", "origin")
+        self.git(second, "config", "user.name", "Test")
+        self.git(second, "config", "user.email", "test@example.com")
+        second_wt = self.root / "second-wt"
+        self.git(second, "worktree", "add", "-b", "feature", str(second_wt))
+        (second_wt / ".gitignore").write_text("local.txt\n")
+        local = second_wt / "local.txt"
+        local.write_text("user data")
+        state_file = self.root / "runs" / r["id"] / "state.json"
+        state = json.loads(state_file.read_text())
+        state["worktrees"].append(dict(repository=str(second), path=str(second_wt),
+                                       branch="feature", main_branch="main"))
+        state_file.write_text(json.dumps(state))
+        self.cli("complete", "task1", "--commit-message", "Save both repositories", ok=False)
+        self.assertTrue(wt.exists())
+        self.assertEqual(local.read_text(), "user data")
+        local.rename(self.root / "saved-local.txt")
+        self.git(second, "worktree", "lock", str(second_wt))
+        self.cli("complete", "task1", ok=False)
+        self.assertFalse(wt.exists())
+        self.assertTrue(second_wt.exists())
+        self.assertFalse(Path(str(self.log) + ".workspace-closed").exists())
+        self.git(second, "worktree", "unlock", str(second_wt))
+        self.cli("complete", "task1")
+        self.assertFalse(second_wt.exists())
+        self.assertEqual((self.root / "saved-local.txt").read_text(), "user data")
+
+    def test_complete_removes_verified_python_bytecode(self):
+        import py_compile
+        repo, wt, r = self.code_review()
+        (wt / ".gitignore").write_text("__pycache__/\n")
+        module = wt / "module.py"
+        module.write_text("VALUE = 1\n")
+        py_compile.compile(str(module), doraise=True)
+        self.cli("complete", "task1", "--commit-message", "Add Python module")
+        self.assertFalse(wt.exists())
+        self.assertEqual((repo / "module.py").read_text(), "VALUE = 1\n")
+
+    def test_complete_preserves_external_open_file(self):
+        repo, wt, r = self.code_review()
+        with (wt / "example.txt").open():
+            result = self.cli("complete", "task1", "--commit-message", "Save task changes", ok=False)
+        self.assertIn(str(os.getpid()), result["worktree_cleanup"]["error"])
+        self.assertTrue(wt.exists())
+        self.cli("complete", "task1")
+        self.assertFalse(wt.exists())
+
+    def test_complete_preserves_skip_worktree_local_changes(self):
+        repo, wt, r = self.code_review()
+        self.git(wt, "update-index", "--skip-worktree", "example.txt")
+        (wt / "example.txt").write_text("hidden local data")
+        result = self.cli("complete", "task1", "--commit-message", "Save task changes", ok=False)
+        self.assertIn("skip-worktree", result["worktree_cleanup"]["error"])
+        self.assertEqual((wt / "example.txt").read_text(), "hidden local data")
+        self.cli("complete", "task1", "--keep-worktree")
+        self.assertTrue(wt.exists())
+
+    def test_complete_own_tab_keep_worktree_passes_detached_request(self):
+        repo, wt, r = self.code_review()
+        self.env["HERDR_PANE_ID"] = "w7:p1"
+        self.cli("complete", "task1", "--keep-worktree", "--commit-message", "Save task changes")
+        request = self.wait_completion(r)
+        self.assertTrue(request["keep_worktree"])
+        self.assertTrue(wt.exists())
+        self.assertTrue(self.cli("run", r["id"])["worktree_cleanup"]["keep"])
+
+    def test_complete_main_removed_tree_close_retry_never_calls_git(self):
+        repo, wt, r = self.code_review()
+        self.env["FAKE_WORKSPACE_CLOSE_FAIL"] = "before"
+        out = self.cli("complete", "task1", "--commit-message", "Save task changes", ok=False)
+        self.assertEqual(out["cleanup"]["status"], "failed")
+        self.assertFalse(wt.exists())
+        blocker = self.root / "git"
+        blocker.write_text("#!/bin/sh\nexit 99\n")
+        blocker.chmod(0o755)
+        self.env["PATH"] = str(self.root) + os.pathsep + self.env["PATH"]
+        self.env.pop("FAKE_WORKSPACE_CLOSE_FAIL")
+        self.assertEqual(self.cli("complete", "task1")["cleanup"]["status"], "closed")
+
+    def test_complete_new_report_after_cleanup_failure_requires_decision(self):
+        repo, wt, r = self.code_review()
+        self.git(repo, "worktree", "lock", str(wt))
+        self.cli("complete", "task1", "--commit-message", "Save task changes", ok=False)
+        self.git(repo, "worktree", "unlock", str(wt))
+        # Model a revised submission restored from persisted review state.
+        state_file = self.root / "runs" / r["id"] / "state.json"
+        state = json.loads(state_file.read_text())
+        state["result_revision"] += 1
+        state_file.write_text(json.dumps(state))
+        result = self.cli("complete", "task1", ok=False)
+        self.assertIn("Отчёт изменился", result["worktree_cleanup"]["error"])
+        self.assertTrue(wt.exists())
+
+    def test_complete_cancel_after_cleanup_failure_preserves_tree(self):
+        repo, wt, r = self.code_review()
+        self.git(repo, "worktree", "lock", str(wt))
+        self.cli("complete", "task1", "--commit-message", "Save task changes", ok=False)
+        result = self.cli("complete", "task1", "--status", "cancelled")
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(result["worktree_cleanup"]["status"], "cancelled")
+        self.assertTrue(wt.exists())
+        self.assertEqual((wt / "added.txt").read_text(), "task artifact")
+
+    def test_complete_cancel_after_failed_push_preserves_work(self):
+        repo, wt, r = self.code_review(remote=True)
+        hook = self.root / "origin.git/hooks/pre-receive"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        self.cli("complete", "task1", "--commit-message", "Save task changes", ok=False)
+        result = self.cli("complete", "task1", "--status", "cancelled")
+        self.assertEqual(result["status"], "cancelled")
+        self.assertTrue(wt.exists())
+        self.assertEqual((wt / "added.txt").read_text(), "task artifact")
+
+    def test_complete_preserves_worktree_local_git_config(self):
+        repo, wt, r = self.code_review()
+        self.git(repo, "config", "extensions.worktreeConfig", "true")
+        self.git(wt, "config", "--worktree", "demo.local", "local setting")
+        result = self.cli("complete", "task1", "--commit-message", "Save task changes", ok=False)
+        self.assertIn("config.worktree", result["worktree_cleanup"]["error"])
+        self.assertTrue(wt.exists())
+        self.cli("complete", "task1", "--keep-worktree")
+        self.assertEqual(self.git(wt, "config", "--worktree", "demo.local"), "local setting")
+
+    def test_complete_recovers_legacy_branch_removal_without_new_phase(self):
+        repo, wt, r = self.code_review(remote=True)
+        self.cli("git-publish", "task1", "--commit-message", "Save task changes")
+        self.git(repo, "worktree", "remove", str(wt))
+        state_file = self.root / "runs" / r["id"] / "state.json"
+        state = json.loads(state_file.read_text())
+        self.assertNotIn("worktree_cleanup", state)
+        state["git_completion"]["status"] = "failed"
+        state["git_completion"]["error"] = "Legacy removal interrupted"
+        state_file.write_text(json.dumps(state))
+        self.cli("complete", "task1")
+        self.assertTrue(self.cli("run", r["id"])["git_completion"]["repositories"][0]["removed"])
+        self.assertFalse(wt.exists())
 
     def test_complete_push_rejection_retains_worktree_and_review_then_retries(self):
         repo, wt, r = self.code_review(remote=True)
@@ -2954,7 +3181,7 @@ class ControlTests(unittest.TestCase):
         self.assertTrue(wt.exists())
         self.assertEqual(self.cli("show", "tasks", "task1")["status"], "review")
 
-    def test_complete_worktree_on_main_pushes_main_and_keeps_tree(self):
+    def test_complete_worktree_on_main_pushes_main_and_removes_tree(self):
         repo, wt, r = self.code_review(remote=True)
         # Git permits main in a linked tree when the primary tree is detached.
         self.git(repo, "checkout", "--detach")
@@ -2966,7 +3193,7 @@ class ControlTests(unittest.TestCase):
         state_file.write_text(json.dumps(state))
         self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
         self.assertEqual(self.git(self.root / "origin.git", "show", "main:example.txt"), "task change")
-        self.assertTrue(wt.exists())
+        self.assertFalse(wt.exists())
         self.assertEqual(self.cli("run", r["id"])["git_completion"]["status"], "completed")
 
     def test_complete_temporary_branch_merges_main_and_pushes_origin(self):
@@ -2976,7 +3203,7 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.git(self.root / "origin.git", "rev-parse", "main"), self.git(repo, "rev-parse", "HEAD"))
         refs = self.git(self.root / "origin.git", "for-each-ref", "--format=%(refname)")
         self.assertNotIn(r["worktrees"][0]["branch"], refs)
-        self.assertTrue(wt.exists())
+        self.assertFalse(wt.exists())
 
     def test_git_mode_can_be_selected_at_review(self):
         repo, wt, r = self.code_review(remote=True)
@@ -3018,7 +3245,7 @@ class ControlTests(unittest.TestCase):
         self.cli("complete", "task1", "--commit-message", "Update example content and add task artifact")
         state_file = self.root / "runs" / r["id"] / "state.json"
         state = json.loads(state_file.read_text())
-        state["git_completion"]["status"] = "pending"
+        state["worktree_cleanup"]["status"] = "pending"
         state["git_completion"]["repositories"][0]["removed"] = False
         # Model the actual boundary before Git checkpoint/acceptance/cleanup.
         state['status'] = 'review'

@@ -1886,7 +1886,7 @@ fn request_file(c: &Context, r: &Value) -> Result<PathBuf> {
 fn queue_completion(c: &Context, a: &Value, r: &Value) -> Result<Value> {
     let file = request_file(c, r)?;
     let token = uuid::Uuid::new_v4().simple().to_string();
-    let mut request = json!({"token":token,"run":r["id"],"task":a["id"],"status":"pending","requested_at":now(),"by":a["by"],"note":a["note"],"target_status":a["status"],"commit_message":a["commit_message"]});
+    let mut request = json!({"token":token,"run":r["id"],"task":a["id"],"status":"pending","requested_at":now(),"by":a["by"],"note":a["note"],"target_status":a["status"],"commit_message":a["commit_message"],"keep_worktree":a["keep_worktree"]});
     c.save(&file, &request)?;
     let mut cmd = c.child();
     cmd.arg("_complete-request")
@@ -1927,7 +1927,7 @@ pub fn complete_request(c: &Context, a: &Value) -> Result<Value> {
     c.save(&file, &request)?;
     let result = (|| {
         c.current(&c.task(s(&r, "task"))?, s(a, "run"))?;
-        let args = json!({"id":r["task"],"status":request["target_status"],"by":request["by"],"note":request["note"],"commit_message":request["commit_message"]});
+        let args = json!({"id":r["task"],"status":request["target_status"],"by":request["by"],"note":request["note"],"commit_message":request["commit_message"],"keep_worktree":request["keep_worktree"]});
         complete_locked(c, &args)
     })();
     match result {
@@ -1949,8 +1949,10 @@ pub fn complete_request(c: &Context, a: &Value) -> Result<Value> {
 pub fn failure(v: &Value) -> bool {
     v["action"] == "error"
         || v["action"] == "close_reviewers"
-        || v["git_completion"]["status"] == "failed"
         || v["cleanup"]["status"] == "failed"
+        || (v["status"] != "cancelled"
+            && (v["git_completion"]["status"] == "failed"
+                || v["worktree_cleanup"]["status"] == "failed"))
         || v.as_array().is_some_and(|a| a.iter().any(failure))
 }
 pub fn complete(c: &Context, a: &Value) -> Result<Value> {
@@ -1966,7 +1968,9 @@ pub fn complete(c: &Context, a: &Value) -> Result<Value> {
             if ["pending", "running"].contains(&s(&req, "status")) {
                 if external::request_alive(&req) {
                     ensure!(
-                        a["status"] == req["target_status"] && a["by"] == req["by"],
+                        a["status"] == req["target_status"]
+                            && a["by"] == req["by"]
+                            && (a["keep_worktree"] == true) == (req["keep_worktree"] == true),
                         "Уже выполняется другой запрос завершения"
                     );
                     return Ok(
@@ -1989,7 +1993,7 @@ pub fn complete(c: &Context, a: &Value) -> Result<Value> {
     {
         let file = request_file(c, r)?;
         if !file.exists() || !["pending", "running"].contains(&s(&c.read(&file)?, "status")) {
-            c.save(&file,&json!({"token":uuid::Uuid::new_v4().simple().to_string(),"run":r["id"],"task":a["id"],"status":"failed","target_status":a["status"],"by":a["by"],"note":a["note"],"commit_message":a["commit_message"],"requested_at":now(),"finished_at":now(),"error":e.to_string()}))?;
+            c.save(&file,&json!({"token":uuid::Uuid::new_v4().simple().to_string(),"run":r["id"],"task":a["id"],"status":"failed","target_status":a["status"],"by":a["by"],"note":a["note"],"commit_message":a["commit_message"],"keep_worktree":a["keep_worktree"],"requested_at":now(),"finished_at":now(),"error":e.to_string()}))?;
         }
     }
     result
@@ -2038,7 +2042,7 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
         && ["closed", "no_tab"].contains(&s(&r["cleanup"], "status"))
     {
         return Ok(
-            json!({"task":t["id"],"run":r["id"],"status":t["status"],"cleanup":r["cleanup"]}),
+            json!({"task":t["id"],"run":r["id"],"status":t["status"],"cleanup":r["cleanup"],"git_completion":r["git_completion"],"worktree_cleanup":r["worktree_cleanup"]}),
         );
     }
     let mut tab = None;
@@ -2126,17 +2130,11 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
             workspace_cleanup_scope(c, r)? != "preserved_other_run",
             "Workspace используется другим незавершённым запуском; завершение остановлено"
         );
-        let frozen_removal = r["git_completion"]["repositories"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|item| {
-                item["path"] == r["repository_workspace"]["path"] && item["mode"] == "push_branch"
-            });
         if !r["repository_workspace"].is_null()
             && let Some(panes) = workspace_panes(c, r)?
             && status == "done"
-            && (t["git_mode"] == "branch" || frozen_removal)
+            && a["keep_worktree"] != true
+            && r["worktree_cleanup"]["keep"] != true
         {
             ensure!(
                 panes
@@ -2150,15 +2148,59 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
         && let Some(r) = &r
         && t["status"] == "review"
         && t["agent_review_policy"] == "auto"
+        && (r["worktree_cleanup"].is_null()
+            || r["worktree_cleanup"]["review_policy"] != t["agent_review_policy"])
     {
         crate::review::guard_publish(c, &t, r)?;
     }
+    if status == "done"
+        && let Some(r) = &mut r
+    {
+        r["cleanup_processes"] = json!([]);
+        if tab.is_some()
+            && a["keep_worktree"] != true
+            && r["worktree_cleanup"]["keep"] != true
+            && r["worktree_cleanup"]["status"] != "completed"
+        {
+            let info = c.herdr(
+                &["pane", "process-info", "--pane", s(r, "pane")],
+                r["herdr_session"].as_str(),
+            )?;
+            ensure!(
+                info["process_info"]["pane_id"] == r["pane"],
+                "Не подтверждены процессы панели исполнителя"
+            );
+            let info = &info["process_info"];
+            let mut pids = vec![];
+            if let Some(pid) = info["shell_pid"].as_u64().filter(|p| *p > 0) {
+                pids.push(pid);
+            }
+            for p in info["foreground_processes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                if let Some(pid) = p["pid"].as_u64().filter(|p| *p > 0) {
+                    pids.push(pid);
+                }
+            }
+            r["cleanup_processes"] = json!(pids);
+        }
+    }
     if let Some(r) = &mut r
         && status == "done"
-        && git::complete_code(c, &mut t, r, a["commit_message"].as_str()).is_err()
+        && git::complete_code(
+            c,
+            &mut t,
+            r,
+            a["commit_message"].as_str(),
+            a["keep_worktree"] == true,
+        )
+        .is_err()
     {
         let mut result = json!({"task":t["id"],"status":t["status"],"next":"Код и таб сохранены; устраните причину и повторите complete"});
         result["git_completion"] = r["git_completion"].clone();
+        result["worktree_cleanup"] = r["worktree_cleanup"].clone();
         return Ok(result);
     }
     if t["status"] != status {
@@ -2172,6 +2214,7 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
             t["cancelled"] = json!({"note":a["note"],"at":now()});
             if let Some(r) = &mut r {
                 r["status"] = json!("cancelled");
+                git::cancel_cleanup(c, &mut t, r)?;
                 c.update(r, &mut t)?;
             } else {
                 t["updated_at"] = json!(now());
@@ -2210,7 +2253,9 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
         }
     }
     c.update(r, &mut t)?;
-    Ok(json!({"task":t["id"],"run":r["id"],"status":t["status"],"cleanup":r["cleanup"]}))
+    Ok(
+        json!({"task":t["id"],"run":r["id"],"status":t["status"],"cleanup":r["cleanup"],"git_completion":r["git_completion"],"worktree_cleanup":r["worktree_cleanup"]}),
+    )
 }
 
 /// Publish only: no acceptance, reviewer cleanup, detached worker or tab closure.
@@ -2239,6 +2284,10 @@ pub fn publish(c: &Context, a: &Value) -> Result<Value> {
     }
     crate::review::guard_publish(c, &t, &r)?;
     let before = crate::review::snapshot(c, &t, &r, None)?;
+    ensure!(
+        r["worktree_cleanup"].is_null(),
+        "Удаление worktree уже началось; повторите complete"
+    );
     let _result = git::publish_code(c, &mut t, &mut r, a["commit_message"].as_str());
     let after = crate::review::snapshot(c, &t, &r, None)?;
     if before["manifest"]["files"] == after["manifest"]["files"] {

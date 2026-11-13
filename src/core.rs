@@ -99,7 +99,7 @@ pub(crate) fn result_summary(c: &Context, r: &Value) -> Result<Value> {
         Value::Null
     };
     let mut summary = json!({"development_result":null,"acceptance":acceptance,
-        "git_publication":r["git_completion"],"deployment":"см. текущую сводку или отчёт; автоматически не определено",
+        "git_publication":r["git_completion"],"worktree_cleanup":r["worktree_cleanup"],"deployment":"см. текущую сводку или отчёт; автоматически не определено",
         "checks":"см. текущую сводку или отчёт и свидетельства"});
     let result = dir.join("result.md");
     if result.is_file() {

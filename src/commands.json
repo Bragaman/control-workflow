@@ -1518,6 +1518,18 @@
         "multiple": false,
         "boolean": false,
         "integer": false
+      },
+      {
+        "name": "keep_worktree",
+        "flags": [
+          "--keep-worktree"
+        ],
+        "required": false,
+        "default": false,
+        "choices": null,
+        "multiple": false,
+        "boolean": true,
+        "integer": false
       }
     ]
   },
