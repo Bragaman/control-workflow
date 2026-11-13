@@ -459,7 +459,7 @@ pub fn capabilities(adapter: &str) -> Value {
     if adapter == "herdr-claude" {
         json!({"interactive_start":true,"assignment_confirmation":true,"resume_by_id":false,"session_id_capture":false,"turn_events":false,"platforms_tested":[],"experimental":true})
     } else {
-        json!({"interactive_start":true,"assignment_confirmation":true,"resume_by_id":false,"session_id_capture":false,"turn_events":false,"platforms_tested":["linux"]})
+        json!({"interactive_start":true,"assignment_confirmation":true,"resume_by_id":false,"session_id_capture":true,"turn_events":false,"platforms_tested":["linux"]})
     }
 }
 pub fn agent_kind<'a>(c: &'a Context, r: &'a Value) -> &'static str {

@@ -121,6 +121,34 @@ fn current_pane(c: &Context, r: &Value) -> Result<Option<Value>> {
     );
     Ok(Some(pane.clone()))
 }
+// A requested ID or a terminal title is not evidence of an actual thread.
+fn capture_session(c: &Context, r: &mut Value) {
+    if external::agent_kind(c, r) != "codex" || r["terminal_id"].as_str().is_none() {
+        return;
+    }
+    let name = format!("cp-{}", s(r, "id").trim_start_matches("run-"));
+    let Ok(v) = c.herdr_timeout(
+        &["agent", "get", &name],
+        r["herdr_session"].as_str(),
+        Duration::from_secs(3),
+    ) else {
+        return;
+    };
+    let a = &v["agent"];
+    let session = &a["agent_session"];
+    if a["name"] == name
+        && a["agent"] == "codex"
+        && a["pane_id"] == r["pane"]
+        && a["tab_id"] == r["tab"]
+        && a["terminal_id"] == r["terminal_id"]
+        && session["agent"] == "codex"
+        && session["kind"] == "id"
+        && session["source"] == "herdr:codex"
+        && !s(session, "value").is_empty()
+    {
+        r["agent_session"] = session.clone();
+    }
+}
 fn start_rejected(r: &Value) -> bool {
     ["startup_error", "error"].iter().any(|field| {
         serde_json::from_str::<Value>(s(r, field))
@@ -427,6 +455,7 @@ pub fn agent_state(c: &Context, r: &Value) -> Result<&'static str> {
     )
 }
 pub fn mark_recovered(c: &Context, r: &mut Value, t: &mut Value) -> Result<()> {
+    capture_session(c, r);
     r["agent_start_completed"] = json!(true);
     r.as_object_mut()
         .unwrap()
@@ -752,6 +781,9 @@ fn summary(c: &Context, t: &Value, r: Option<&Value>, action: &str) -> Result<Va
     let mut v = json!({"task":t["id"],"title":t["title"],"status":t["status"],"goal":t["goal"],"action":action});
     let dir = if let Some(r) = r {
         extend(&mut v, core::run_context(r));
+        if action == "result" {
+            v["result_summary"] = core::result_summary(c, r)?;
+        }
         extend(
             &mut v,
             json!({"run":r["id"],"run_status":r["status"],"state":c.run_file(s(r,"id"))?,"workspace":r["workspace"],"tab":r["tab"],"pane":r["pane"]}),
@@ -849,6 +881,11 @@ fn open_one(c: &Context, id: &str, requested: Option<&str>) -> Result<Value> {
                     crate::review::guard_restart(c, &t)?;
                     mark_recovered(c, &mut r, &mut t)?;
                     action = "recovered";
+                } else if r["agent_session"].is_null() {
+                    capture_session(c, &mut r);
+                    if !r["agent_session"].is_null() {
+                        c.update(&mut r, &mut t)?;
+                    }
                 }
                 return summary(c, &t, Some(&r), action);
             }
@@ -1365,11 +1402,15 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
         }
         c.update(&mut fresh, &mut t)?;
     }
+    capture_session(c, &mut r);
     {
         let _lock = c.lock()?;
         let mut fresh = c.read(&c.run_file(id)?)?;
         t = c.task(s(&r, "task"))?;
         c.current(&t, id)?;
+        if !r["agent_session"].is_null() {
+            fresh["agent_session"] = r["agent_session"].clone();
+        }
         fresh["agent_start_completed"] = json!(true);
         fresh
             .as_object_mut()
