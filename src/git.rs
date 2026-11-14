@@ -139,38 +139,87 @@ fn checkpoint(c: &Context, t: &mut Value, r: &mut Value) -> Result<()> {
     text.push_str(&format!("\nУдаление worktree: {}\n", r["worktree_cleanup"]));
     store::atomic(&dir.join("git-completion.md"), text.as_bytes())
 }
+// Keep current outcome separate from the immutable evidence of earlier attempts.
+fn start_attempt(phase: &mut Value, mut details: Value) {
+    if !phase["attempts"].is_array() {
+        phase["attempts"] = json!([]);
+        if phase["error"].is_string() {
+            let legacy = json!({"status":"failed","error":phase["error"],"legacy":true});
+            phase["attempts"].as_array_mut().unwrap().push(legacy);
+        }
+    }
+    if phase["first_error"].is_null() && phase["error"].is_string() {
+        phase["first_error"] = phase["error"].clone();
+    }
+    let attempts = phase["attempts"].as_array_mut().unwrap();
+    if let Some(last) = attempts.last_mut()
+        && last["status"] == "pending"
+    {
+        last["status"] = json!("interrupted");
+    }
+    details["status"] = json!("pending");
+    details["started_at"] = json!(crate::store::now());
+    attempts.push(details);
+}
+
+fn end_attempt(phase: &mut Value, result: &Result<()>) {
+    if let Err(error) = result {
+        phase["status"] = json!("failed");
+        phase["error"] = json!(error.to_string());
+        if phase["first_error"].is_null() {
+            phase["first_error"] = phase["error"].clone();
+        }
+    }
+    let outcome = phase["status"].clone();
+    let attempt = phase["attempts"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap();
+    attempt["status"] = outcome;
+    attempt["finished_at"] = json!(crate::store::now());
+    if let Err(error) = result {
+        attempt["error"] = json!(error.to_string());
+    }
+}
+
 pub fn complete_code(
     c: &Context,
     t: &mut Value,
     r: &mut Value,
     message: Option<&str>,
-    keep_worktree: bool,
 ) -> Result<()> {
     if r["worktree_cleanup"].is_null() {
         publish_code(c, t, r, message)?;
-        r["worktree_cleanup"] = json!({"status":"pending","keep":keep_worktree,"submission":r["result_revision"],"review_policy":t["agent_review_policy"]});
-        checkpoint(c, t, r)?;
+        r["worktree_cleanup"] = json!({"status":"pending","submission":r["result_revision"],"review_policy":t["agent_review_policy"]});
     }
-    if keep_worktree && r["worktree_cleanup"]["status"] != "completed" {
-        r["worktree_cleanup"]["keep"] = json!(true);
+    if r["worktree_cleanup"]["status"] == "completed" {
+        return remove_completed_worktrees(c, t, r);
     }
+    // Old keep/process policies do not override the current deletion policy.
+    r["worktree_cleanup"]["keep"] = json!(false);
+    start_attempt(&mut r["worktree_cleanup"], json!({}));
+    checkpoint(c, t, r)?;
     let result = remove_completed_worktrees(c, t, r);
-    if let Err(e) = &result {
-        r["worktree_cleanup"]["status"] = json!("failed");
-        r["worktree_cleanup"]["error"] = json!(e.to_string());
-        checkpoint(c, t, r)?;
-    }
+    end_attempt(&mut r["worktree_cleanup"], &result);
+    checkpoint(c, t, r)?;
     result
 }
 
 pub fn cancel_cleanup(c: &Context, t: &mut Value, r: &mut Value) -> Result<()> {
     if !r["worktree_cleanup"].is_null() && r["worktree_cleanup"]["status"] != "completed" {
+        start_attempt(
+            &mut r["worktree_cleanup"],
+            json!({"action":"cancel","keep":true,"keep_reason":"cancelled: preserve unpublished work"}),
+        );
         r["worktree_cleanup"]["status"] = json!("cancelled");
         r["worktree_cleanup"]["keep"] = json!(true);
+        r["worktree_cleanup"]["keep_reason"] = json!("cancelled: preserve unpublished work");
         r["worktree_cleanup"]
             .as_object_mut()
             .unwrap()
             .remove("error");
+        end_attempt(&mut r["worktree_cleanup"], &Ok(()));
         for item in r["git_completion"]["repositories"]
             .as_array_mut()
             .into_iter()
@@ -425,12 +474,11 @@ pub fn publish_code(
     if r["git_completion"].is_null() {
         r["git_completion"] = json!({"status":"pending","repositories":[],"git_mode":t["git_mode"].as_str().unwrap_or("main")});
     }
+    start_attempt(&mut r["git_completion"], json!({}));
+    checkpoint(c, t, r)?;
     let result = complete_inner(c, t, r, message.unwrap_or("").trim());
-    if let Err(e) = &result {
-        r["git_completion"]["status"] = json!("failed");
-        r["git_completion"]["error"] = json!(e.to_string());
-        checkpoint(c, t, r)?;
-    }
+    end_attempt(&mut r["git_completion"], &result);
+    checkpoint(c, t, r)?;
     result
 }
 
@@ -493,8 +541,37 @@ pub fn publication_current(r: &Value) -> Result<bool> {
     Ok(true)
 }
 
-// Publication and deletion are separate durable phases. Never republish on a
-// removal retry: new edits require a new review, rather than another commit.
+// Only another unfinished task can retain a published worktree.
+fn worktree_users(c: &Context, task: &Value, wt: &Path) -> Result<Vec<Value>> {
+    let wt = std::fs::canonicalize(wt)?;
+    let mut users = vec![];
+    for other in c.rows("tasks")? {
+        if other["id"] == task["id"] || ["done", "cancelled"].contains(&s(&other, "status")) {
+            continue;
+        }
+        let Some(run_id) = other["active_run"].as_str() else {
+            continue;
+        };
+        let run = c.current(&other, run_id)?;
+        let cwd_uses = if let Some(cwd) = run["cwd"].as_str() {
+            crate::config::location(Path::new(cwd))?.starts_with(&wt)
+        } else {
+            false
+        };
+        let mut uses = cwd_uses;
+        for path in run["worktrees"].as_array().into_iter().flatten() {
+            let path = crate::config::location(Path::new(s(path, "path")))?;
+            uses |= path.starts_with(&wt) || wt.starts_with(path);
+        }
+        if uses {
+            users.push(json!({"task":other["id"],"run":run_id}));
+        }
+    }
+    Ok(users)
+}
+
+// Publication and deletion are separate durable phases: a removal retry never
+// republishes code. Git owns recursive deletion, including local/ignored files.
 fn remove_completed_worktrees(c: &Context, t: &mut Value, r: &mut Value) -> Result<()> {
     ensure!(
         r["worktree_cleanup"]["submission"] == r["result_revision"],
@@ -512,27 +589,18 @@ fn remove_completed_worktrees(c: &Context, t: &mut Value, r: &mut Value) -> Resu
         publication_current(r)?,
         "Сохранённый Git-результат изменился. Где сохранить новые коммиты? Worktree и таб оставлены"
     );
-    let items = r["git_completion"]["repositories"]
+    let count = r["git_completion"]["repositories"]
         .as_array()
         .unwrap()
-        .clone();
-    let keep = r["worktree_cleanup"]["keep"] == true;
-    let mut allowed = vec![std::process::id()];
-    if !keep && r["cleanup_processes"].is_array() {
-        allowed.extend(
-            r["cleanup_processes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|p| p.as_u64().and_then(|p| u32::try_from(p).ok())),
-        );
-    }
-    for item in &items {
-        let wt = Path::new(s(item, "path"));
+        .len();
+    for i in 0..count {
+        let mut item = r["git_completion"]["repositories"][i].clone();
+        let path = std::path::PathBuf::from(s(&item, "path"));
+        let wt = path.as_path();
         if item["removed"] == true {
             ensure!(
                 !wt.exists(),
-                "Путь удалённого worktree снова занят: {}. Кому принадлежит новое дерево?",
+                "Путь удалённого worktree снова занят: {}",
                 wt.display()
             );
             continue;
@@ -540,88 +608,37 @@ fn remove_completed_worktrees(c: &Context, t: &mut Value, r: &mut Value) -> Resu
         if !wt.exists() && item["removal_pending"] == true {
             ensure!(
                 !git(
-                    Path::new(s(item, "repository")),
+                    Path::new(s(&item, "repository")),
                     &["worktree", "list", "--porcelain"],
                     false
                 )?
                 .lines()
-                .any(|l| l == format!("worktree {}", wt.display())),
-                "Worktree отсутствует, но зарегистрирован Git; нужна сверка: {}",
+                .any(|line| line == format!("worktree {}", wt.display())),
+                "Worktree отсутствует, но зарегистрирован Git: {}",
                 wt.display()
             );
-            continue;
-        }
-        validate_worktree(item)?;
-        if keep {
-            continue;
-        }
-        for path in [&c.root, &c.bindings, &c.program]
-            .into_iter()
-            .chain(c.config.iter())
-        {
-            ensure!(
-                !std::fs::canonicalize(path)?.starts_with(std::fs::canonicalize(wt)?),
-                "Ресурсы панели находятся внутри {}. Куда перенести их перед удалением?",
-                wt.display()
-            );
-        }
-        for other in c.runs()? {
-            if other["id"] == r["id"]
-                || ["done", "cancelled"].contains(&s(&other, "status"))
-                || (other["task"] == r["task"] && other["status"] == "interrupted")
-            {
+        } else {
+            validate_worktree(&item)?;
+            let users = worktree_users(c, t, wt)?;
+            if !users.is_empty() {
+                item["kept"] = json!(true);
+                item["used_by"] = json!(users);
+                r["git_completion"]["repositories"][i] = item;
+                checkpoint(c, t, r)?;
                 continue;
             }
-            ensure!(
-                !other["worktrees"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|w| w["path"] == item["path"]),
-                "Worktree используется запуском {}. Сохранить дерево через --keep-worktree?",
-                s(&other, "id")
-            );
+            item["removal_pending"] = json!(true);
+            r["git_completion"]["repositories"][i] = item.clone();
+            checkpoint(c, t, r)?;
+            git(
+                Path::new(s(&item, "repository")),
+                &["worktree", "remove", "--force", "--force", s(&item, "path")],
+                false,
+            )?;
         }
-        reproducible_cache_files(wt)?;
-        validate_local_flags(wt)?;
-        processes_outside_pane(wt, &allowed)?;
-    }
-    for i in 0..items.len() {
-        let mut item = r["git_completion"]["repositories"][i].clone();
-        if keep {
-            if item["removed"] != true {
-                item["kept"] = json!(true);
-            }
-        } else if item["removed"] != true {
-            let wt = Path::new(s(&item, "path"));
-            if wt.exists() {
-                // Recheck immediately before the destructive command.
-                validate_worktree(&item)?;
-                validate_local_flags(wt)?;
-                ensure!(
-                    git(wt, &["rev-parse", "HEAD"], false)? == s(&item, "commit"),
-                    "В worktree появились неопубликованные коммиты; где сохранить изменения?"
-                );
-                ensure!(
-                    git(wt, &["status", "--porcelain"], false)?.is_empty(),
-                    "Worktree изменился перед удалением; где сохранить изменения?"
-                );
-                let caches = reproducible_cache_files(wt)?;
-                processes_outside_pane(wt, &allowed)?;
-                item["removal_pending"] = json!(true);
-                r["git_completion"]["repositories"][i] = item.clone();
-                checkpoint(c, t, r)?;
-                for file in caches {
-                    std::fs::remove_file(file)?;
-                }
-                git(
-                    Path::new(s(&item, "repository")),
-                    &["worktree", "remove", s(&item, "path")],
-                    false,
-                )?;
-            }
-            item["removed"] = json!(true);
-        }
+        item["removed"] = json!(true);
+        item.as_object_mut().unwrap().remove("kept");
+        item.as_object_mut().unwrap().remove("used_by");
         r["git_completion"]["repositories"][i] = item;
         checkpoint(c, t, r)?;
     }
@@ -631,160 +648,6 @@ fn remove_completed_worktrees(c: &Context, t: &mut Value, r: &mut Value) -> Resu
         .unwrap()
         .remove("error");
     checkpoint(c, t, r)
-}
-
-fn validate_local_flags(wt: &Path) -> Result<()> {
-    let config = wt.join(git(
-        wt,
-        &["rev-parse", "--git-path", "config.worktree"],
-        false,
-    )?);
-    ensure!(
-        !config.exists(),
-        "У worktree {} есть локальный config.worktree. Куда сохранить настройки перед удалением? Можно выбрать --keep-worktree",
-        wt.display()
-    );
-    ensure!(
-        git(
-            wt,
-            &[
-                "for-each-ref",
-                "--format=%(refname)",
-                "refs/worktree/",
-                "refs/bisect/",
-                "refs/rewritten/"
-            ],
-            false
-        )?
-        .is_empty(),
-        "У worktree {} есть локальные Git refs. Где сохранить их перед удалением?",
-        wt.display()
-    );
-    let flags = git(wt, &["ls-files", "-v"], false)?;
-    ensure!(!flags.lines().any(|l| l.starts_with('S') || l.as_bytes().first().is_some_and(u8::is_ascii_lowercase)),"В {} есть skip-worktree/assume-unchanged файлы. Снимите флаги и сохраните данные либо выберите --keep-worktree",wt.display());
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn processes_outside_pane(wt: &Path, allowed: &[u32]) -> Result<()> {
-    let wt = std::fs::canonicalize(wt)?;
-    for entry in std::fs::read_dir("/proc")? {
-        let entry = entry?;
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        if allowed.contains(&pid) {
-            continue;
-        }
-        let dir = entry.path();
-        use std::os::unix::fs::MetadataExt;
-        let Ok(metadata) = std::fs::metadata(&dir) else {
-            continue;
-        };
-        if metadata.uid() != unsafe { libc::geteuid() } {
-            continue;
-        }
-        if !external::process_running(pid as i64) {
-            continue;
-        }
-        for name in ["cwd", "exe"] {
-            match std::fs::read_link(dir.join(name)) {
-                Ok(path) => ensure!(
-                    !path.starts_with(&wt),
-                    "Worktree {} использует процесс PID {} ({}). Завершите его или выберите --keep-worktree",
-                    wt.display(),
-                    pid,
-                    name
-                ),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    ensure!(
-                        !external::process_running(pid as i64),
-                        "Нельзя проверить PID {}: {}. Сохранить дерево через --keep-worktree?",
-                        pid,
-                        e
-                    );
-                }
-            }
-        }
-        match std::fs::read_to_string(dir.join("maps")) {
-            Ok(maps) => {
-                for line in maps.lines() {
-                    if let Some(start) = line.find('/') {
-                        ensure!(
-                            !Path::new(&line[start..]).starts_with(&wt),
-                            "В worktree {} отображён файл процессом PID {}. Завершите процесс или выберите --keep-worktree",
-                            wt.display(),
-                            pid
-                        );
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => ensure!(
-                !external::process_running(pid as i64),
-                "Нельзя проверить отображения PID {}: {}. Сохранить дерево через --keep-worktree?",
-                pid,
-                e
-            ),
-        }
-        let fds = match std::fs::read_dir(dir.join("fd")) {
-            Ok(fds) => Some(fds),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => {
-                ensure!(
-                    !external::process_running(pid as i64),
-                    "Нельзя проверить файлы PID {}: {}. Сохранить дерево через --keep-worktree?",
-                    pid,
-                    e
-                );
-                None
-            }
-        };
-        if let Some(fds) = fds {
-            for fd in fds {
-                let fd = fd?;
-                match std::fs::read_link(fd.path()) {
-                    Ok(path) => ensure!(
-                        !path.starts_with(&wt),
-                        "В worktree {} открыт файл процессом PID {}. Завершите процесс или выберите --keep-worktree",
-                        wt.display(),
-                        pid
-                    ),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => ensure!(
-                        !external::process_running(pid as i64),
-                        "Нельзя проверить дескриптор PID {}: {}. Сохранить дерево через --keep-worktree?",
-                        pid,
-                        e
-                    ),
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn processes_outside_pane(wt: &Path, allowed: &[u32]) -> Result<()> {
-    let (ok, out, err) = external::output(
-        Command::new("lsof").args(["-t", "+D"]).arg(wt),
-        Duration::from_secs(60),
-    )?;
-    ensure!(
-        err.trim().is_empty() && (ok || out.trim().is_empty()),
-        "Не удалось проверить процессы worktree; сохранить через --keep-worktree?"
-    );
-    for pid in out.lines() {
-        let pid = pid.parse::<u32>()?;
-        ensure!(
-            allowed.contains(&pid),
-            "Worktree {} использует PID {}. Завершите процесс или выберите --keep-worktree",
-            wt.display(),
-            pid
-        );
-    }
-    Ok(())
 }
 
 fn validate_secret_files(wt: &Path) -> Result<()> {
@@ -815,65 +678,4 @@ fn validate_secret_files(wt: &Path) -> Result<()> {
         );
     }
     Ok(())
-}
-
-// Only bytecode with a tracked source is proven disposable. A directory name
-// such as target/.venv/cache alone is not evidence about all its contents.
-fn reproducible_cache_files(wt: &Path) -> Result<Vec<std::path::PathBuf>> {
-    let canonical_wt = std::fs::canonicalize(wt)?;
-    let ignored = git(
-        wt,
-        &[
-            "ls-files",
-            "-z",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-        ],
-        false,
-    )?;
-    let mut files = vec![];
-    for file in ignored.split('\0').filter(|s| !s.is_empty()) {
-        let path = Path::new(file);
-        let parent = path.parent().unwrap_or(Path::new(""));
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        let source = name.split_once(".cpython-").map(|(stem, _)| {
-            parent
-                .parent()
-                .unwrap_or(Path::new(""))
-                .join(format!("{stem}.py"))
-        });
-        let full = wt.join(path);
-        let valid = parent.file_name().is_some_and(|p| p == "__pycache__")
-            && name.ends_with(".pyc")
-            && source.as_ref().is_some_and(|source| {
-                wt.join(source).is_file()
-                    && git(
-                        wt,
-                        &[
-                            "ls-files",
-                            "--error-unmatch",
-                            "--",
-                            &source.to_string_lossy(),
-                        ],
-                        true,
-                    )
-                    .is_ok_and(|s| !s.is_empty())
-            })
-            && std::fs::symlink_metadata(&full).is_ok_and(|m| m.is_file())
-            && std::fs::canonicalize(&full).is_ok_and(|p| p.starts_with(&canonical_wt))
-            && std::fs::read(&full).is_ok_and(|b| {
-                b.len() > 16
-                    && b[2..4] == *b"\r\n"
-                    && u32::from_le_bytes(b[4..8].try_into().unwrap()) <= 3
-            });
-        ensure!(
-            valid,
-            "В {} есть ignored/local файл {}. Куда перенести нужные данные перед удалением? Можно явно сохранить дерево через --keep-worktree",
-            wt.display(),
-            file
-        );
-        files.push(full);
-    }
-    Ok(files)
 }

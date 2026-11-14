@@ -94,7 +94,7 @@ class MCPControlTests(fixture.ControlTests):
         names = {t['name'] for t in self.client.request('tools/list')['result']['tools']}
         self.assertTrue({'open', 'complete', 'review-request', 'memory-list'} <= names)
         complete = next(t for t in self.client.request('tools/list')['result']['tools'] if t['name'] == 'complete')
-        self.assertEqual(complete['inputSchema']['properties']['keep_worktree']['type'], 'boolean')
+        self.assertNotIn('keep_worktree', complete['inputSchema']['properties'])
         self.assertFalse(any(n.startswith('_') for n in names))
         self.assertNotIn('install', names)
         self.assertEqual(self.client.request('ping')['result'], {})
