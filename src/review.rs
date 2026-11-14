@@ -1120,9 +1120,8 @@ fn feedback(
     if a["feedback_started"].is_null() {
         let findings = strings(&a["result"]["findings"]);
         ensure!(
-            !findings.is_empty()
-                && (a["status"] == "changes_requested"
-                    || (args["user_requested"] == true && a["status"] == "failed")),
+            (!findings.is_empty() && a["status"] == "changes_requested")
+                || (args["user_requested"] == true && a["status"] == "failed"),
             "Нужны замечания; failed возобновляется только по поручению пользователя"
         );
         if args["user_requested"] != true && !legacy {
@@ -1143,10 +1142,22 @@ fn feedback(
         a["feedback_started"] = json!(now());
         a["feedback_user_requested"] = args["user_requested"].clone();
         if s(&a, "feedback_message").is_empty() {
+            let details = if findings.is_empty() {
+                let reason = if s(&a, "conclusion").is_empty() {
+                    s(&a["result"], "conclusion")
+                } else {
+                    s(&a, "conclusion")
+                };
+                format!(
+                    "Устрани техническую причину failed и повтори независимое ревью. Причина: {reason}"
+                )
+            } else {
+                findings.join("\n")
+            };
             a["feedback_message"] = json!(format!(
                 "{}: Исправь только замечания в исходном объёме assignment.md. Спорные требования передай пользователю. Затем finish в том же запуске.\n{}",
                 s(t, "id"),
-                findings.join("\n")
+                details
             ));
         }
         a["delivery_required"] = json!(

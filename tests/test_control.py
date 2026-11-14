@@ -473,6 +473,40 @@ class ControlTests(unittest.TestCase):
         self.cli("review-feedback", "--run", r["id"], "--id", a["id"], "--delivered")
         self.assertEqual(self.cli("show", "tasks", "task1")["status"], "review")
 
+    def test_technical_review_failure_can_resume_and_replace_artifacts(self):
+        r = self.review()
+        self.cli("task-set", "task1", "--agent-review-policy", "auto")
+        changing = self.root / "changing.json"
+        changing.write_text("before")
+        a = self.cli("review-request", "--run", r["id"], "--artifact", str(changing))
+        changing.write_text("after")
+        self.cli("review-claim", "--run", r["id"], "--id", a["id"], "--actor", "tester", ok=False)
+        failed = self.cli("review-show", "--run", r["id"], "--latest")["attempts"][0]
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["conclusion"], "Снимок устарел до запуска")
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"], ok=False)
+        resumed = self.cli("review-feedback", "--run", r["id"], "--id", a["id"], "--user-requested")
+        self.assertTrue(resumed["feedback_user_requested"])
+        self.assertIn(failed["conclusion"], resumed["feedback_message"])
+        self.assertEqual(self.cli("run", r["id"])["status"], "running")
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"], "--delivered")
+        stable = self.root / "stable.txt"
+        stable.write_text("fixed evidence")
+        report = self.root / "fixed.md"
+        report.write_text("Исправлен состав артефактов")
+        out = self.cli("finish", "--run", r["id"], "--report", str(report), "--artifact", str(stable))
+        b = out["agent_review"]
+        self.assertEqual(b["status"], "pending")
+        self.assertNotEqual(a["id"], b["id"])
+        self.assertEqual(out["handoff"]["automatic_returns_remaining"], 3)
+        changing.write_text("changed again")
+        files = self.cli("review-read", "--run", r["id"], "--id", b["id"], "--section", "files")
+        self.assertIn(str(stable), files)
+        self.assertNotIn(str(changing), files)
+        self.cli("review-claim", "--run", r["id"], "--id", b["id"], "--actor", "new-tester")
+        self.cli("review-feedback", "--run", r["id"], "--id", a["id"], "--delivered")
+        self.assertEqual(self.cli("run", r["id"])["status"], "review")
+
     def test_agent_review_reservations_limit_without_delivery_ack(self):
         r, a = self.agent_review_changes()
         for cycle in range(3):
