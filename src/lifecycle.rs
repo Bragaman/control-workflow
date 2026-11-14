@@ -476,7 +476,18 @@ pub fn start(
     repair: bool,
     requested: Option<&str>,
 ) -> Result<Value> {
-    let mut t = c.task(id)?;
+    let t = c.task(id)?;
+    let (_, r) = start_task(c, t, reopen, repair, requested)?;
+    Ok(json!({"run":r["id"],"status":"launching","state":c.run_file(s(&r, "id"))?}))
+}
+
+fn start_task(
+    c: &Context,
+    mut t: Value,
+    reopen: bool,
+    repair: bool,
+    requested: Option<&str>,
+) -> Result<(Value, Value)> {
     crate::review::guard_restart(c, &t)?;
     let run_profile = core::profile_for_run(c, &t, requested)?;
     ensure!(
@@ -750,7 +761,7 @@ pub fn start(
             return Err(e);
         }
     }
-    Ok(json!({"run":id,"status":"launching","state":c.run_file(&id)?}))
+    Ok((t, r))
 }
 /// Caller holds the state lock. Never discard an ambiguous external mutation.
 pub fn reconcile_launcher(c: &Context, r: &mut Value) -> Result<()> {
@@ -896,9 +907,8 @@ fn open_one(c: &Context, id: &str, requested: Option<&str>) -> Result<Value> {
         "Открытие недоступно для статуса {}",
         s(&t, "status")
     );
-    start(c, id, !t["active_run"].is_null(), true, requested)?;
-    let t = c.task(id)?;
-    let r = c.read(&c.run_file(s(&t, "active_run"))?)?;
+    let reopen = !t["active_run"].is_null();
+    let (t, r) = start_task(c, t, reopen, true, requested)?;
     summary(c, &t, Some(&r), "preparing")
 }
 pub fn open(c: &Context, a: &Value) -> Result<Value> {

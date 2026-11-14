@@ -528,6 +528,10 @@ pub fn start_args(
             a.extend(["--add-dir".into(), dir.to_string_lossy().into()]);
         }
     }
-    a.push(format!("{}: Прочитай задание {} и выполни его. Покажи результат в чате и сохрани полезные артефакты по {}.",s(t,"id"),assignment.display(),c.program.join("docs/worker.md").display()));
+    a.push(format!(
+        "{}: Прочитай задание {} и выполни его. Покажи результат в чате.",
+        s(t, "id"),
+        assignment.display()
+    ));
     a
 }
