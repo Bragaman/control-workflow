@@ -1,6 +1,121 @@
 use control_workflow::{args, config::Context, review, store};
 use serde_json::{Value, json};
 use std::{path::Path, process::Command};
+
+#[test]
+fn control_skill_command_examples_parse() {
+    let commands: &[&[&str]] = &[
+        &["tasks"],
+        &["tasks", "--project", "lab"],
+        &["tasks", "--status", "blocked"],
+        &["tasks", "--status", "review"],
+        &["tasks", "--all"],
+        &["projects"],
+        &[
+            "project-create",
+            "lab",
+            "--name",
+            "Lab",
+            "--description",
+            "Description",
+        ],
+        &[
+            "project-set",
+            "lab",
+            "--description",
+            "Description",
+            "--repo",
+            "/repo",
+        ],
+        &[
+            "task-create",
+            "task",
+            "--project",
+            "lab",
+            "--title",
+            "Title",
+            "--goal",
+            "Goal",
+            "--acceptance",
+            "Checks",
+            "--code",
+            "--task-kind",
+            "implementation",
+            "--complexity",
+            "normal",
+            "--profile",
+            "terra-high",
+            "--agent-review-policy",
+            "auto",
+            "--compact",
+        ],
+        &[
+            "task-set",
+            "task",
+            "--goal",
+            "Goal",
+            "--acceptance",
+            "Checks",
+            "--status",
+            "ready",
+            "--compact",
+        ],
+        &["open", "task1", "task2"],
+        &["open", "task", "--profile", "terra-high"],
+        &["run", "run-id", "--compact"],
+        &["show", "tasks", "task"],
+        &["show", "projects", "lab"],
+        &["tasks", "--project", "lab", "--all"],
+        &[
+            "memory-list",
+            "--project",
+            "lab",
+            "--query",
+            "topic",
+            "--limit",
+            "10",
+        ],
+        &[
+            "memory-add",
+            "--project",
+            "lab",
+            "--kind",
+            "knowledge",
+            "--title",
+            "Fact",
+            "--file",
+            "/tmp/fact.md",
+        ],
+        &["progress", "--run", "run-id", "--text", "Done"],
+        &["complete", "task"],
+        &[
+            "complete",
+            "task",
+            "--status",
+            "cancelled",
+            "--note",
+            "Reason",
+        ],
+        &["git-publish", "task", "--commit-message", "Update content"],
+    ];
+    for command in commands {
+        let argv = std::iter::once("control-workflow").chain(command.iter().copied());
+        let matches = args::cli()
+            .try_get_matches_from(argv)
+            .unwrap_or_else(|e| panic!("{command:?}: {e}"));
+        args::values(&matches).unwrap_or_else(|e| panic!("{command:?}: {e}"));
+    }
+    assert!(
+        args::cli()
+            .try_get_matches_from(["control-workflow", "task-create", "task"])
+            .is_err()
+    );
+    assert!(
+        args::cli()
+            .try_get_matches_from(["control-workflow", "tasks", "--status", "unknown"])
+            .is_err()
+    );
+}
 fn context(dir: &Path) -> Context {
     std::fs::write(dir.join("config.json"), "{}").unwrap();
     let m = args::cli()

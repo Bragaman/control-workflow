@@ -5,9 +5,10 @@ description: Найти или сохранить решения, знания �
 
 Если контракт экземпляра ещё не прочитан, читай
 [control-entry.md](../../docs/control-entry.md).
-Ищи выборочно: memory-list --project ID --query 'тема' --limit 10; команда включает shared.
-Сохраняй решения, проверенные знания и отчёты через memory-add --project ID
---kind decision|knowledge|work --title '...' --file /path/artifact.md.
+Ищи выборочно: `memory-list --project ID --query 'тема' --limit 10`; команда включает shared.
+Сохраняй решения, проверенные знания и отчёты через
+`memory-add --project ID --kind knowledge --title '...' --file /path/artifact.md`;
+для решений используй `--kind decision`, для отчётов — `--kind work`.
 Для общей записи — --project shared. В своём запуске укажи --run RUN_ID;
 для другого проекта сохраняй без --run, со ссылкой на отчёт своего запуска.
 

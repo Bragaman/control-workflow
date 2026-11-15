@@ -5,8 +5,9 @@ description: Показать задачи, проекты и ожидающие
 
 Если контракт экземпляра ещё не прочитан, читай
 [control-entry.md](../../docs/control-entry.md).
-Выполни `tasks`; при необходимости --project ID или --status blocked|review.
---all используй для завершённых/отменённых; для проектов — projects.
+Выполни `tasks`; при необходимости `tasks --project ID` или
+`tasks --status blocked` (для ревью — `--status review`). Для завершённых и
+отменённых используй `tasks --all`; для проектов — `projects`.
 Покажи ID, название и статус. Для списка достаточно краткого вывода команды.
 Если спрашивают, что ждёт ответа, прочитай questions.json только blocked;
 для launch_failed — error из state.json. Просмотр списка не запускает задачи.

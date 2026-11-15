@@ -1492,7 +1492,7 @@ pub fn assignment_text(c: &Context, r: &Value, t: &Value) -> Result<String> {
         "нет".into()
     };
     Ok(format!(
-        "# Задача {}: {}\n\nЦель: {}\n\nКритерии готовности: {}\n\nСостояние панели: {}\nРесурсы программы: {}\nЗапуск: {}\nАдаптер: {}\nПрофиль: {}; выбор: {}.\nМодель: {}; reasoning effort: {}.\nПроект: {}\nРабочие деревья: {}\nЗавершение Git: {}; контракт: {}\nПриёмка: {}.\nПолитика агентского ревью: {}.\n\nДо работы прочитай контракт исполнителя: {}.\nПравила планирования: {}.\nПрочитай {}, если он есть; иначе {}.\nПредыдущий запуск: {}.\nАртефакты и checkpoint текущего запуска сохраняй в {}.\n\nКоманда панели (из любого cwd): {}\nВ progress/block/finish/memory-add указывай --run {}.\nДля памяти: memory-list --project {} --query 'тема' --limit 10; читай только нужные записи.\nСамостоятельный finish оставляет review; complete требует поручения пользователя. При auto сразу после finish выполни handoff по docs/agent-review.md: независимый subagent до итогового ответа, затем исправление замечаний в том же запуске.\n",
+        "# Задача {}: {}\n\nЦель: {}\n\nКритерии готовности: {}\n\nСостояние панели: {}\nРесурсы программы: {}\nЗапуск: {}\nАдаптер: {}\nПрофиль: {}; выбор: {}.\nМодель: {}; reasoning effort: {}.\nПроект: {} ({})\nРабочие деревья: {}\nЗавершение Git: {}; контракт: {}\nПриёмка: {}.\nПолитика агентского ревью: {}.\n\nДо работы прочитай контракт исполнителя: {}.\nПравила планирования: {}.\nПрочитай {}, если он есть; иначе {}.\nПредыдущий запуск: {}.\nАртефакты и checkpoint текущего запуска сохраняй в {}.\n\nКоманда панели (из любого cwd): {}\n",
         s(t, "id"),
         s(t, "title"),
         s(t, "goal"),
@@ -1505,6 +1505,7 @@ pub fn assignment_text(c: &Context, r: &Value, t: &Value) -> Result<String> {
         r["model_selection"],
         s(r, "model"),
         s(r, "reasoning_effort"),
+        s(t, "project"),
         c.path("projects", s(t, "project"))?.display(),
         r["worktrees"],
         s(t, "git_mode"),
@@ -1521,9 +1522,7 @@ pub fn assignment_text(c: &Context, r: &Value, t: &Value) -> Result<String> {
             .display(),
         previous,
         dir.display(),
-        entry_command(c),
-        s(r, "id"),
-        s(t, "project")
+        entry_command(c)
     ))
 }
 pub fn plan(c: &Context, a: &Value) -> Result<Value> {

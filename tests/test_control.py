@@ -369,6 +369,35 @@ class ControlTests(unittest.TestCase):
         self.assertNotIn('launch_argv', short)
         self.assertIn('launch_argv', self.cli('run', r['id']))
 
+    def test_sync_documented_commands_accept_fixture_values(self):
+        self.cli('project-set', 'lab', '--description', 'Проверенное описание')
+        self.create()
+        self.cli('task-set', 'task1', '--goal', 'Уточнённая цель')
+        run = self.start()
+        self.cli('progress', '--run', run['id'], '--text', 'Сделано; следующий шаг')
+        fact = self.root / 'fact.md'
+        fact.write_text('Проверенный факт')
+        self.cli('memory-add', '--project', 'lab', '--kind', 'knowledge',
+                 '--title', 'Факт', '--file', str(fact))
+        self.assertEqual(self.cli('show', 'tasks', 'task1')['goal'], 'Уточнённая цель')
+        self.assertEqual(self.cli('run', run['id'], '--compact')['last_action'], 'Сделано; следующий шаг')
+
+    def test_list_project_and_memory_documented_commands(self):
+        self.cli('project-create', 'demo', '--name', 'Demo', '--description', 'Description')
+        self.cli('project-set', 'demo', '--description', 'Updated')
+        self.create()
+        self.cli('tasks', '--project', 'lab')
+        self.cli('tasks', '--status', 'blocked')
+        self.cli('tasks', '--status', 'review')
+        self.cli('tasks', '--all')
+        self.cli('projects')
+        fact = self.root / 'fact.md'
+        fact.write_text('Проверенный факт')
+        self.cli('memory-add', '--project', 'lab', '--kind', 'knowledge',
+                 '--title', 'Тема', '--file', str(fact))
+        found = self.cli('memory-list', '--project', 'lab', '--query', 'Тема', '--limit', '10')
+        self.assertEqual(found['total'], 1)
+
     def test_compact_legacy_run_has_explicit_unknown_context(self):
         self.create()
         run = self.start()
@@ -981,9 +1010,25 @@ class ControlTests(unittest.TestCase):
         artifact.write_text("changed")
         self.assertTrue(self.cli("review-show", "--run", r["id"])["attempts"][-1]["stale"])
 
+    def test_auto_review_late_artifact_replaces_finish_attempt(self):
+        self.create('task1', '--agent-review-policy', 'auto')
+        run = self.start()
+        report = self.root / 'report.md'; report.write_text('Отчёт')
+        first = self.cli('finish', '--run', run['id'], '--report', str(report))['agent_review']
+        artifact = self.root / 'artifact.txt'; artifact.write_text('Результат')
+        current = self.cli('review-request', '--run', run['id'], '--artifact', str(artifact))
+        self.assertNotEqual(first['id'], current['id'])
+        self.cli('review-claim', '--run', run['id'], '--id', current['id'], '--actor', 'reviewer')
+        entry = self.cli('review-read', '--run', run['id'], '--id', current['id'], '--section', 'files')
+        self.assertIn(str(artifact), entry)
+
     def test_auto_review_handoff_waits_for_independent_verdict(self):
         self.create('task1')
         r = self.start()
+        assignment = (self.root / 'runs' / r['id'] / 'assignment.md').read_text()
+        for value in ('Проверить', 'Проверки проходят', 'Проект: lab (', r['id'],
+                      'docs/worker.md', 'docs/planning.md', '--state-root', '--bindings-root'):
+            self.assertIn(value, assignment)
         report = self.root / 'report.md'; report.write_text('Ready for review')
         out = self.cli('finish', '--run', r['id'], '--report', str(report))
         self.assertEqual(out['handoff']['action'], 'run_independent_review')
@@ -991,6 +1036,10 @@ class ControlTests(unittest.TestCase):
         notices = self.cli('notifications')
         self.assertFalse(any(n['title'].startswith('Готово к приёмке') for n in notices))
         a = out['agent_review']
+        packet = Path(a['packet']).read_text()
+        for required in ('review-read', r['id'], a['id'], 'task.goal', 'task.acceptance',
+                         'version', 'evidence', 'failed', 'complete'):
+            self.assertIn(required, packet)
         self.cli('review-claim', '--run', r['id'], '--id', a['id'], '--actor', 'fresh-reviewer')
         verdict = self.root / 'verdict.json'
         verdict.write_text(json.dumps(dict(version=a['version'], status='passed', conclusion='Checked',
