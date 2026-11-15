@@ -2,7 +2,7 @@
 
 Бери абсолютный путь bin/control-workflow и параметры state/config/bindings из assignment.md
 или выбранной пользователем установки. Из любого cwd вызывай
-`/absolute/path/control_plane/bin/control-workflow`.
+`/absolute/path/program/bin/control-workflow`.
 Установка и state — разные выборы; неизвестный экземпляр уточни
 до записи. Выбранные пути показывает `environment`.
 

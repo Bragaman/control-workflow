@@ -14,7 +14,7 @@ SCRIPTS = ('control', 'completion_git', 'install_skills', 'artifact_links', 'her
            'doctor', 'release_audit', 'agent_review')
 DOCS = ('worker', 'planning', 'control-entry', 'git-policy', 'recovery', 'runtime-layout',
         'agent-review', 'install', 'architecture', 'compatibility', 'questions', 'task-profile',
-        'model-policy')
+        'model-policy', 'schedules')
 SKILLS = ('list', 'project', 'task', 'start', 'review', 'complete', 'git-publish', 'memory', 'sync', 'update')
 ALLOWLIST = ({'README.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', '.gitignore',
               'config/defaults.json', 'config/model-policy.json',

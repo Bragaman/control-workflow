@@ -8,9 +8,13 @@
 | Слой | Файлы | Выбор |
 | --- | --- | --- |
 | Программа | bin/, config/defaults.json, config/model-policy.json, docs/, skills/ | Физический путь bin/control-workflow; ресурсы доступны для чтения |
-| Пользователь | JSON с model_policy, model_overrides (либо legacy profiles), adapter, git_mode, agent_start_timeout_ms, state_root, bindings_root | --config, затем CONTROL_PLANE_CONFIG; без выбора — defaults.json |
+| Пользователь | JSON с model_policy, model_overrides (либо legacy profiles), adapter, git_mode, agent_start_timeout_ms, state_root, bindings_root | --config, затем CONTROL_PLANE_CONFIG, затем файл config ОС, если он есть; значения дополняют defaults.json |
 | Машина | BINDINGS_ROOT/runtime.json, projects/ID.json и tasks/ID.json | --bindings-root, CONTROL_PLANE_BINDINGS, bindings_root из config, иначе STATE_ROOT/bindings |
-| Состояние | projects/, tasks/, runs/, memory/, notifications/, views/, status/, .control.lock | --state-root, CONTROL_PLANE_STATE, прежний CONTROL_PLANE_ROOT, state_root из config, иначе внешний каталог ОС |
+| Состояние | projects/, tasks/, runs/, memory/, schedules/, notifications/, views/, status/, .control.lock | --state-root, CONTROL_PLANE_STATE, прежний CONTROL_PLANE_ROOT, state_root из config, иначе внешний каталог ОС |
+
+Установленный бинарник определяет program_root как родитель bin. Для явного
+выбора ресурсов используй --program-root или CONTROL_WORKFLOW_PROGRAM.
+Программа, state, bindings и config выбираются независимо.
 
 Пути state/bindings/runtime в JSON должны быть абсолютными. Путь model_policy
 может быть относительным к каталогу config. Относительные пути параметров CLI и
@@ -78,7 +82,7 @@ Markdown-конструкции не преобразуются.
 Отсутствующие bindings schema_version читаются как версия 1 для совместимости.
 
 Именованные профили, приоритеты и миграция: [model-policy.md](model-policy.md).
-# Результат и связь с сессией
+## Результат и связь с сессией
 
 `run ID --compact` и `open ID` для результата показывают отдельно путь к
 исходному result.md, приёмку из task, Git-сохранение и последнее дополнение

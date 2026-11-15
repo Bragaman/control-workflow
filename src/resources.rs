@@ -49,6 +49,7 @@ pub const FILES: &[(&str, &str)] = &[
         include_str!("../docs/runtime-layout.md"),
     ),
     ("docs/rust.md", include_str!("../docs/rust.md")),
+    ("docs/schedules.md", include_str!("../docs/schedules.md")),
     (
         "docs/task-profile.md",
         include_str!("../docs/task-profile.md"),
