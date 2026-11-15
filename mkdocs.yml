@@ -1,20 +1,46 @@
 site_name: control-workflow
+site_description: Работа с агентами — от задачи до принятого результата
 site_url: https://bragaman.github.io/control-workflow/
-repo_url: https://github.com/Bragaman/control-workflow
-edit_uri: edit/main/
 docs_dir: target/docs-src
 site_dir: target/site
 theme:
-  name: mkdocs
-  locale: ru
+  name: material
+  language: ru
+  font: false
+  icon:
+    logo: material/console
+  palette:
+    - scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Тёмная тема
+    - scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Светлая тема
+  features:
+    - navigation.footer
+    - navigation.top
+    - search.highlight
+    - content.code.copy
 plugins:
   - search:
       lang: [ru, en]
 markdown_extensions:
   - tables
-  - fenced_code
+  - attr_list
+  - pymdownx.highlight
+  - pymdownx.superfences
   - toc:
       permalink: true
+extra_css:
+  - docs/guide/assets/style.css
+extra:
+  generator: false
 validation:
   nav:
     omitted_files: warn
@@ -23,35 +49,9 @@ validation:
     anchors: warn
     unrecognized_links: warn
 nav:
-  - Главная: README.md
-  - Начало работы:
-      - Установка и обновление: docs/install.md
-      - Команда и экземпляр: docs/control-entry.md
-      - Настройки и данные: docs/runtime-layout.md
-      - Совместимость: docs/compatibility.md
-  - Работа с задачами:
-      - Исполнитель: docs/worker.md
-      - Планирование: docs/planning.md
-      - Вопросы: docs/questions.md
-      - Независимое ревью: docs/agent-review.md
-      - Git и приёмка: docs/git-policy.md
-      - Восстановление: docs/recovery.md
-      - Тип и сложность: docs/task-profile.md
-      - Модели: docs/model-policy.md
-      - Расписания: docs/schedules.md
-  - Команды и навыки:
-      - Списки: skills/control-list/SKILL.md
-      - Проекты: skills/control-project/SKILL.md
-      - Задачи: skills/control-task/SKILL.md
-      - Запуск: skills/control-start/SKILL.md
-      - Результат и ревью: skills/control-review/SKILL.md
-      - Приёмка: skills/control-complete/SKILL.md
-      - Сохранение кода: skills/control-git-publish/SKILL.md
-      - Память: skills/control-memory/SKILL.md
-      - Сверка: skills/control-sync/SKILL.md
-      - Проверки сверки: skills/control-sync/references/checks.md
-      - Обновление: skills/control-update/SKILL.md
-  - Пример задачи: examples/task.md
-  - Разработка:
-      - Rust, MCP и выпуск: docs/rust.md
-      - Архитектура: docs/architecture.md
+  - Обзор: README.md
+  - Установка: docs/guide/installation.md
+  - Первая задача: docs/guide/first-task.md
+  - Работа с задачами: docs/guide/workflow.md
+  - Настройки: docs/guide/settings.md
+  - Справка: docs/guide/reference.md

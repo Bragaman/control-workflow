@@ -33,6 +33,10 @@ NATIVE_FILES = {'build.rs', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
     'src/' + name for name in ('args.rs', 'casefold.rs', 'commands.json', 'config.rs', 'core.rs',
                                'external.rs', 'git.rs', 'lib.rs', 'lifecycle.rs',
                                'main.rs', 'mcp.rs', 'policy.rs', 'resources.rs', 'review.rs', 'schedule.rs', 'shipping.rs', 'store.rs')}
+PUBLIC_DOCS = {'docs/guide/' + name for name in (
+    'installation.md', 'first-task.md', 'workflow.md', 'settings.md', 'reference.md',
+    'assets/roles.svg', 'assets/lifecycle.svg', 'assets/storage.svg', 'assets/style.css')}
+ALLOWLIST |= PUBLIC_DOCS
 ALLOWLIST |= NATIVE_FILES
 ALLOWLIST |= {'mkdocs.yml', 'requirements-docs.txt', 'scripts/prepare_docs.py',
               '.github/workflows/docs.yml'}

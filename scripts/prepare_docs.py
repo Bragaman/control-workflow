@@ -14,7 +14,7 @@ def main():
     manifest = json.loads((ROOT / 'distribution.json').read_text())['files']
     for name in sorted(manifest):
         if name not in ('README.md', 'LICENSE') and not name.startswith(
-            ('docs/', 'skills/', 'examples/', 'config/')
+            ('docs/guide/',)
         ):
             continue
         source = ROOT / name

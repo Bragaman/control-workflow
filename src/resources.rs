@@ -99,4 +99,36 @@ pub const FILES: &[(&str, &str)] = &[
         "skills/control-task/SKILL.md",
         include_str!("../skills/control-task/SKILL.md"),
     ),
+    (
+        "docs/guide/installation.md",
+        include_str!("../docs/guide/installation.md"),
+    ),
+    (
+        "docs/guide/first-task.md",
+        include_str!("../docs/guide/first-task.md"),
+    ),
+    (
+        "docs/guide/workflow.md",
+        include_str!("../docs/guide/workflow.md"),
+    ),
+    (
+        "docs/guide/settings.md",
+        include_str!("../docs/guide/settings.md"),
+    ),
+    (
+        "docs/guide/reference.md",
+        include_str!("../docs/guide/reference.md"),
+    ),
+    (
+        "docs/guide/assets/roles.svg",
+        include_str!("../docs/guide/assets/roles.svg"),
+    ),
+    (
+        "docs/guide/assets/lifecycle.svg",
+        include_str!("../docs/guide/assets/lifecycle.svg"),
+    ),
+    (
+        "docs/guide/assets/storage.svg",
+        include_str!("../docs/guide/assets/storage.svg"),
+    ),
 ];

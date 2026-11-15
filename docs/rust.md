@@ -35,10 +35,11 @@ python3 scripts/release_audit.py
 
 ## Сайт документации
 
-Сайт собирается MkDocs из README, docs и связанных skills/examples/config.
+Сайт собирается MkDocs Material из README и пользовательских страниц docs/guide.
 Единственные поддерживаемые исходники остаются на прежних местах. Скрипт берёт
-публичные файлы из distribution.json и создаёт временное дерево target/docs-src;
-генерируемые файлы не коммитятся. Сборка не меняет комплект ресурсов CLI.
+README, лицензию и docs/guide из distribution.json и создаёт временное дерево target/docs-src;
+генерируемые файлы не коммитятся. Служебные docs/skills не публикуются и не входят
+в поиск сайта. Пользовательские страницы и SVG входят в комплект CLI вместе с README.
 
 ```sh
 python3 -m venv target/docs-venv
