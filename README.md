@@ -4,8 +4,8 @@
 агент выполняет её в отдельном терминале, а вы проверяете результат и принимаете работу.
 Планы, отчёты и состояние сохраняются в файлах — к задаче можно вернуться после перерыва.
 
-[Начать работу](docs/guide/installation.md){ .md-button .md-button--primary }
-[Первая задача](docs/guide/first-task.md){ .md-button }
+[Начать работу](https://bragaman.github.io/control-workflow/docs/guide/installation/){ .md-button .md-button--primary }
+[Первая задача](https://bragaman.github.io/control-workflow/docs/guide/first-task/){ .md-button }
 
 ![Вы выбираете задачу, управляющий открывает исполнителя, исполнитель передаёт результат на проверку. Принимает работу пользователь.](docs/guide/assets/roles.svg)
 
@@ -20,11 +20,11 @@
 
 ## Дальше
 
-- [Установка](docs/guide/installation.md) — зависимости и подготовка экземпляра.
-- [Первая задача](docs/guide/first-task.md) — пройти цикл от постановки до приёмки.
-- [Работа с задачами](docs/guide/workflow.md) — статусы, вопросы, ревью и Git.
-- [Настройки](docs/guide/settings.md) — хранение данных, агент и модели.
-- [Справка](docs/guide/reference.md) — команды и решение типичных проблем.
+- [Установка](https://bragaman.github.io/control-workflow/docs/guide/installation/) — зависимости и подготовка экземпляра.
+- [Первая задача](https://bragaman.github.io/control-workflow/docs/guide/first-task/) — пройти цикл от постановки до приёмки.
+- [Работа с задачами](https://bragaman.github.io/control-workflow/docs/guide/workflow/) — статусы, вопросы, ревью и Git.
+- [Настройки](https://bragaman.github.io/control-workflow/docs/guide/settings/) — хранение данных, агент и модели.
+- [Справка](https://bragaman.github.io/control-workflow/docs/guide/reference/) — команды и решение типичных проблем.
 
 Выпуск экспериментальный. Целевые платформы — Linux x86_64/ARM64 и macOS ARM64.
 Автотесты не подтверждают полный цикл с реальным CLI агента: для Claude Code
