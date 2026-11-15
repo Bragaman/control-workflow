@@ -141,6 +141,7 @@ pub fn execute(c: &Context, name: &str, a: &Value) -> Result<Value> {
         "plan" => lifecycle::plan(c, a),
         "mcp" => bail!("mcp — отдельный транспорт"),
         "install" | "package" => crate::shipping::install(c, s(a, "prefix"), name == "package"),
+        "update" => crate::shipping::update(c, a["version"].as_str(), a["check"] == true),
         "doctor" => crate::shipping::doctor(c),
         "skills" => crate::shipping::skills(c, s(a, "destination"), s(a, "action")),
         "_complete-request" => {

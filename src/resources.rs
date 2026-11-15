@@ -91,6 +91,10 @@ pub const FILES: &[(&str, &str)] = &[
         include_str!("../skills/control-sync/references/checks.md"),
     ),
     (
+        "skills/control-update/SKILL.md",
+        include_str!("../skills/control-update/SKILL.md"),
+    ),
+    (
         "skills/control-task/SKILL.md",
         include_str!("../skills/control-task/SKILL.md"),
     ),

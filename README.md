@@ -99,10 +99,14 @@ target/release/control-workflow install --prefix "$HOME/.local/share/control-wor
 
 Готовые архивы Linux x86_64/ARM64 и macOS ARM64, а также SHA256SUMS доступны в [GitHub Releases](https://github.com/Bragaman/control-workflow/releases). Проверка суммы, установка и обновление с сохранением state/config/bindings описаны в [инструкции](docs/install.md). Пакеты macOS не подписаны и не notarized; Gatekeeper может блокировать запуск.
 
-Готовая поставка работает без Python и Rust toolchain. Для обновления запусти install из распакованного нового пакета с прежним prefix: установщик проверяет старые
-файлы, сохраняет backup и оставляет state/config/bindings на месте.
+Для обновления из текущих локальных исходников: `./scripts/install.sh --prefix "$CW_PROGRAM"` (нужны Rust и linker). Скрипт не меняет Git и не требует опубликованного release.
+
+Готовая поставка работает без Python и Rust toolchain. Для обновления установленной
+версии с поддержкой update выполните `"$CW_PROGRAM/bin/control-workflow" update`;
+проверить доступную версию можно через `update --check`. Подготовка безопасного
+окна и переход со старой версии описаны в инструкции.
 [Пошаговая установка](docs/install.md) ведёт от установки зависимостей до новой
-сессии herdr и управляющего Codex с восемью скиллами и явно выбранным экземпляром.
+сессии herdr и управляющего Codex со скиллами и явно выбранным экземпляром.
 
 Программа, пользовательский config, привязки машины и state хранятся раздельно.
 Дистрибутив содержит исходники и синтетические примеры. Проекты, задачи,
@@ -150,6 +154,7 @@ cp "$HOME/.local/share/control-workflow/program/examples/config-codex.json" \
 | [control-complete](skills/control-complete/SKILL.md) | По поручению пользователя принимает, завершает или отменяет задачу, выполняет Git-завершение и закрывает исполнителя. Нужен для окончательной приёмки или отмены. |
 | [control-memory](skills/control-memory/SKILL.md) | Ищет и сохраняет решения, знания и отчёты в памяти проекта или общей памяти. Нужен, чтобы использовать прежний опыт и сохранить новые выводы. |
 | [control-sync](skills/control-sync/SKILL.md) | По запросу сверяет записи панели и документацию с фактическим состоянием проектов и ресурсов, вносит подтверждённые исправления. Нужен для актуализации состояния. |
+| [control-update](skills/control-update/SKILL.md) | Проверяет версию и обновляет установленную программу из checkout или выпуска. |
 
 ## Поддержка
 

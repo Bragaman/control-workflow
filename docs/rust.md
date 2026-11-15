@@ -60,7 +60,7 @@ printf '{}\n' > /path/to/test-preferences.json
 /path/to/native-package/bin/control-workflow skills --destination /path/to/client/skills --action remove
 ```
 
-Перед изменениями проверяются все восемь ссылок. Чужие файлы и ссылки приводят к отказу; команда не заменяет их.
+Перед изменениями проверяются все ссылки. Чужие файлы и ссылки приводят к отказу; команда не заменяет их.
 
 Повторяемые проверки контрактов, кроме cargo test:
 

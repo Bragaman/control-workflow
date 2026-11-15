@@ -1,5 +1,10 @@
 """Distribution, isolated install/update and Claude lifecycle acceptance with fake herdr."""
 import json
+import hashlib
+import fcntl
+import platform
+import io
+import tarfile
 import os
 from pathlib import Path
 import subprocess
@@ -73,8 +78,14 @@ class PublicInstallTests(unittest.TestCase):
         config_before = config.read_bytes()
         for destination in (self.root / '.agents/skills', self.root / '.claude/skills'):
             self.call(script, 'skills', '--destination', destination)
+            old_link = destination / 'control-task'
+            original_target = os.readlink(old_link)
+            (destination / 'control-update').unlink()
+            self.call(script, 'skills', '--destination', destination)
+            self.assertEqual(os.readlink(old_link), original_target)
             self.call(script, 'skills', '--destination', destination, '--action', 'check')
-            self.assertEqual(len(list(destination.iterdir())), 9)
+            self.assertTrue((destination / 'control-update' / 'SKILL.md').is_file())
+            self.assertEqual(len(list(destination.iterdir())), 10)
         updated = json.loads(self.call(BINARY, 'install', '--prefix', prefix).stdout)
         self.assertTrue(Path(updated['backup']).is_dir())
         self.assertEqual(before, {str(p.relative_to(state)): p.read_bytes() for p in state.rglob('*') if p.is_file()})
@@ -95,6 +106,61 @@ class PublicInstallTests(unittest.TestCase):
         self.call(BINARY, 'install', '--prefix', prefix, ok=False)
         self.assertEqual(managed.read_text(), 'local changes')
 
+    def test_release_update_and_failures(self):
+        prefix = self.root / 'program'
+        package = self.root / 'package'
+        self.call(BINARY, 'install', '--prefix', prefix)
+        self.call(BINARY, 'package', '--prefix', package)
+        script = prefix / 'bin/control-workflow'
+        manifest = prefix / 'distribution-rust.json'
+        old = json.loads(manifest.read_text()); old['version'] = '0.0.0'
+        manifest.write_text(json.dumps(old))
+        version = self.call(BINARY, '--version').stdout.strip().split()[-1]
+        tag = 'v' + version
+        arch = 'aarch64' if platform.machine() == 'arm64' else platform.machine()
+        platform_name = ('macos' if sys.platform == 'darwin' else 'linux') + '-' + arch
+        name = f'control-workflow-{tag}-{platform_name}.tar.gz'
+        releases = self.root / 'releases'; releases.mkdir()
+        subprocess.run(['tar', '--format', 'ustar', '-czf', str(releases / name), '-C', str(package), '.'], check=True)
+        checksum = hashlib.sha256((releases / name).read_bytes()).hexdigest()
+        (releases / 'SHA256SUMS').write_text(f'{checksum}  {name}\n')
+        (releases / 'latest').write_text(json.dumps({'tag_name': tag}))
+        fakebin = self.root / 'fakebin'; fakebin.mkdir()
+        curl = fakebin / 'curl'
+        curl.write_text("#!/usr/bin/env python3\nimport os, pathlib, shutil, sys\na=sys.argv; url=a[-1]; name='latest' if url.endswith('/latest') else url.rsplit('/',1)[-1]\nshutil.copyfile(pathlib.Path(os.environ['FAKE_RELEASES']) / name, a[a.index('--output')+1])\n")
+        curl.chmod(0o755)
+        self.env['PATH'] = str(fakebin) + os.pathsep + self.env['PATH']
+        self.env['FAKE_RELEASES'] = str(releases)
+        state = self.root / 'data'; state.mkdir(); (state / 'checkpoint').write_text('saved')
+        config = self.root / 'config.json'; config.write_text('{"schema_version":1}')
+        args = ['--state-root', state, '--config', config, 'update']
+        checked = json.loads(self.call(script, *args, '--check').stdout)
+        self.assertEqual((checked['current'], checked['available']), ('0.0.0', tag))
+        (releases / 'SHA256SUMS').write_text(f'{"0" * 64}  {name}\n')
+        self.call(script, *args, ok=False)
+        self.assertEqual(json.loads(manifest.read_text())['version'], '0.0.0')
+        original_archive = (releases / name).read_bytes()
+        with tarfile.open(releases / name, 'w:gz') as archive:
+            entry = tarfile.TarInfo('../escape'); entry.size = 1
+            archive.addfile(entry, io.BytesIO(b'x'))
+        bad_checksum = hashlib.sha256((releases / name).read_bytes()).hexdigest()
+        (releases / 'SHA256SUMS').write_text(f'{bad_checksum}  {name}\n')
+        self.call(script, *args, ok=False)
+        self.assertFalse((self.root / 'escape').exists())
+        (releases / name).write_bytes(original_archive)
+        (releases / 'SHA256SUMS').write_text(f'{checksum}  {name}\n')
+        lockname = hashlib.sha256(str(prefix).encode()).hexdigest()
+        with (self.root / f'.workflow-install-{lockname}.lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.call(script, *args, ok=False)
+        self.assertEqual(json.loads(manifest.read_text())['version'], '0.0.0')
+        updated = json.loads(self.call(script, *args).stdout)
+        self.assertEqual(updated['status'], 'updated')
+        self.assertTrue(Path(updated['installation']['backup']).is_dir())
+        self.assertEqual((state / 'checkpoint').read_text(), 'saved')
+        self.assertEqual(config.read_text(), '{"schema_version":1}')
+        self.assertEqual(json.loads(self.call(script, *args).stdout)['status'], 'unchanged')
+
     def test_skill_conflict_is_atomic_and_remove_refuses_foreign_link(self):
         destination = self.root / 'skills'; destination.mkdir()
         foreign = destination / 'control-task'; foreign.mkdir()
@@ -103,7 +169,7 @@ class PublicInstallTests(unittest.TestCase):
         self.call(BINARY, 'skills', '--destination', destination)
         foreign.unlink(); foreign.symlink_to(self.root / 'missing')
         self.call(BINARY, 'skills', '--destination', destination, '--action', 'remove', ok=False)
-        self.assertEqual(len(list(destination.iterdir())), 9)
+        self.assertEqual(len(list(destination.iterdir())), 10)
 
     def test_default_paths_are_external_and_unknown_schema_fails_before_state(self):
         script = BINARY

@@ -27,6 +27,12 @@ jobs:
           components: rustfmt, clippy
       - run: python3 -m pip install -r requirements-dev.txt
       - run: sh scripts/check.sh
+      - name: Install from checkout
+        run: |
+          set -eu
+          "$GITHUB_WORKSPACE/scripts/install.sh" --prefix "$RUNNER_TEMP/source install"
+          "$GITHUB_WORKSPACE/scripts/install.sh" --prefix "$RUNNER_TEMP/source install"
+          test "$("$RUNNER_TEMP/source install/bin/control-workflow" --version)" = "$(target/release/control-workflow --version)"
       - name: Validate release version
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -42,7 +48,7 @@ jobs:
           target/release/control-workflow package --prefix "$RUNNER_TEMP/package"
           if [ "$IS_TAG" = true ]; then version="$RELEASE_TAG"; else version=ci; fi
           archive="control-workflow-$version-$PLATFORM.tar.gz"
-          tar -czf "$archive" -C "$RUNNER_TEMP/package" .
+          tar --format ustar -czf "$archive" -C "$RUNNER_TEMP/package" .
           mkdir "$RUNNER_TEMP/unpacked"
           tar -xzf "$archive" -C "$RUNNER_TEMP/unpacked"
           python3 scripts/check_release.py --package "$RUNNER_TEMP/unpacked"

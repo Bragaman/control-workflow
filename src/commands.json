@@ -1708,6 +1708,35 @@
     "options": []
   },
   {
+    "name": "update",
+    "options": [
+      {
+        "name": "version",
+        "flags": [
+          "--version"
+        ],
+        "required": false,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "check",
+        "flags": [
+          "--check"
+        ],
+        "required": false,
+        "default": false,
+        "choices": null,
+        "multiple": false,
+        "boolean": true,
+        "integer": false
+      }
+    ]
+  },
+  {
     "name": "install",
     "options": [
       {

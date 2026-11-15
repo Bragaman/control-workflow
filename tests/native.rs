@@ -173,6 +173,7 @@ fn native_package_is_independent_and_rejects_foreign_files() {
         "examples/config-codex.json",
         "examples/task.md",
         "skills/control-sync/SKILL.md",
+        "skills/control-update/SKILL.md",
     ] {
         assert_eq!(
             std::fs::read(prefix.join(name)).unwrap(),
@@ -304,7 +305,7 @@ fn installation_update_backup_and_skill_conflicts_are_preserved() {
     let dest = temp.path().join("skills");
     let args = ["skills", "--destination", dest.to_str().unwrap()];
     assert!(invoke(&installed, &args).status.success());
-    assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 9);
+    assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 10);
     assert!(
         invoke(
             &installed,
@@ -336,7 +337,7 @@ fn installation_update_backup_and_skill_conflicts_are_preserved() {
         .status
         .success()
     );
-    assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 9);
+    assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 10);
     let alias = temp.path().join("alias");
     std::os::unix::fs::symlink(&prefix, &alias).unwrap();
     assert!(
