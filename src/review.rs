@@ -269,6 +269,49 @@ fn verify(c: &Context, a: &Value) -> Result<Value> {
     }
     Ok(frozen)
 }
+pub fn verify_publication_binding(c: &Context, r: &Value) -> Result<()> {
+    let binding = &r["accepted_review"];
+    ensure!(
+        binding["id"].is_string() && binding["submission"] == r["result_revision"],
+        "Нет подтверждённой связи принятого результата с ревью (legacy)"
+    );
+    let data = load(c, r)?;
+    let last = data["attempts"]
+        .as_array()
+        .and_then(|v| v.last())
+        .ok_or_else(|| anyhow!("Нет принятого ревью"))?;
+    ensure!(
+        last["id"] == binding["id"]
+            && last["version"] == binding["version"]
+            && last["status"] == "passed",
+        "Связь принятого ревью повреждена"
+    );
+    verify(c, last)?;
+    let saved = binding["publication"]["repositories"]
+        .as_array()
+        .ok_or_else(|| anyhow!("Нет публикации"))?;
+    let published = r["git_completion"]["repositories"]
+        .as_array()
+        .ok_or_else(|| anyhow!("Нет публикации"))?;
+    ensure!(
+        r["git_completion"]["status"] == "completed"
+            && saved.len() == published.len()
+            && saved.iter().zip(published).all(|(a, b)| [
+                "path",
+                "repository",
+                "commit",
+                "main_commit",
+                "remote_commit",
+                "mode",
+                "published"
+            ]
+            .iter()
+            .all(|k| a[k] == b[k])),
+        "Связь с публикацией повреждена"
+    );
+    Ok(())
+}
+
 fn review_file(c: &Context, r: &Value) -> Result<PathBuf> {
     Ok(c.run_file(s(r, "id"))?.with_file_name("agent-review.json"))
 }
@@ -673,9 +716,33 @@ pub fn handle(c: &Context, name: &str, args: &Value) -> Result<Value> {
                     .collect(),
             );
         }
-        let version = snapshot(c, &t, &r, None).ok().map(|v| v["version"].clone());
+        let archived = t["status"] == "done" && r["status"] == "done";
+        let version = if archived {
+            ensure!(
+                t["accepted"]["by"].is_string() && t["accepted"]["by"] == t["reviewer"],
+                "Нет подтверждённой приёмки"
+            );
+            verify_publication_binding(c, &r)?;
+            r["accepted_review"]["version"].clone()
+        } else {
+            snapshot(c, &t, &r, None)?["version"].clone()
+        };
         for a in view["attempts"].as_array_mut().unwrap() {
-            a["stale"] = json!(version.as_ref() != Some(&a["version"]));
+            if a["status"] == "passed" {
+                verify(c, a)?;
+            }
+            a["stale"] = json!(
+                version != a["version"]
+                    && (archived
+                        || r["published_review_version"] != version
+                        || r["published_review"]["id"] != a["id"]
+                        || r["published_review"]["version"] != a["version"]
+                        || r["published_review"]["submission"] != r["result_revision"]
+                        || data["attempts"]
+                            .as_array()
+                            .and_then(|v| v.last())
+                            .is_none_or(|last| last["id"] != a["id"]))
+            );
         }
         if t["agent_review_policy"] == "auto" {
             view["handoff"] = handoff(
@@ -1192,6 +1259,51 @@ fn feedback(
     Ok(a)
 }
 
+fn publication_retry_matches(
+    c: &Context,
+    r: &Value,
+    last: &Value,
+    current: &Value,
+) -> Result<bool> {
+    Ok(
+        if last["status"] == "passed"
+            && r["publication_review"]["id"] == last["id"]
+            && r["publication_review"]["version"] == last["version"]
+            && r["publication_review"]["submission"] == r["result_revision"]
+        {
+            let frozen = verify(c, last)?;
+            let old_repos = frozen["manifest"]["repositories"].as_array();
+            let new_repos = current["manifest"]["repositories"].as_array();
+            frozen["manifest"]["files"] == current["manifest"]["files"]
+                && frozen["manifest"]["task"] == current["manifest"]["task"]
+                && frozen["manifest"]["project"] == current["manifest"]["project"]
+                && old_repos.zip(new_repos).is_some_and(|(old, new)| {
+                    old.len() == new.len()
+                        && old.iter().zip(new).all(|(before, after)| {
+                            let item =
+                                r["git_completion"]["repositories"]
+                                    .as_array()
+                                    .and_then(|items| {
+                                        items.iter().find(|i| i["path"] == before["path"])
+                                    });
+                            let committed = item.and_then(|i| i["commit"].as_str());
+                            before["path"] == after["path"]
+                                && before["repository"] == after["repository"]
+                                && if let Some(commit) = committed {
+                                    after["head"] == commit && after["status"] == ""
+                                } else {
+                                    ["head", "base", "status", "diff"]
+                                        .iter()
+                                        .all(|k| before[k] == after[k])
+                                }
+                        })
+                })
+        } else {
+            false
+        },
+    )
+}
+
 pub fn guard_publish(c: &Context, t: &Value, r: &Value) -> Result<()> {
     if t["agent_review_policy"] != "auto" {
         return Ok(());
@@ -1201,10 +1313,20 @@ pub fn guard_publish(c: &Context, t: &Value, r: &Value) -> Result<()> {
         .as_array()
         .and_then(|v| v.last())
         .unwrap_or(&Value::Null);
-    let version = snapshot(c, t, r, None)?["version"].clone();
+    if last["status"] == "passed" {
+        verify(c, last)?;
+    }
+    let current = snapshot(c, t, r, None)?;
+    let version = &current["version"];
+    let retry = publication_retry_matches(c, r, last, &current)?;
     ensure!(
         last["status"] == "passed"
-            && (last["version"] == version || r["published_review_version"] == version),
+            && (last["version"] == *version
+                || (r["published_review_version"] == *version
+                    && r["published_review"]["id"] == last["id"]
+                    && r["published_review"]["version"] == last["version"]
+                    && r["published_review"]["submission"] == r["result_revision"])
+                || retry),
         "Нужно актуальное passed агентское ревью перед сохранением"
     );
     Ok(())
@@ -1329,4 +1451,63 @@ pub fn recovery_review_after_fast_forward(
         "Ревью устарело или состояние неоднозначно"
     );
     Ok(frozen)
+}
+
+pub fn prepare_publication(c: &Context, t: &mut Value, r: &mut Value) -> Result<()> {
+    let data = load(c, r)?;
+    let a = data["attempts"].as_array().and_then(|v| v.last());
+    if let Some(a) = a.filter(|a| a["status"] == "passed") {
+        let current = snapshot(c, t, r, None)?;
+        let already_prepared = publication_retry_matches(c, r, a, &current)?;
+        if current["version"] == a["version"]
+            || already_prepared
+            || t["agent_review_policy"] == "auto"
+        {
+            verify(c, a)?;
+            r["publication_review"] =
+                json!({"id":a["id"],"version":a["version"],"submission":r["result_revision"]});
+            c.update(r, t)?;
+        } else if t["agent_review_policy"] != "auto" && !r["publication_review"].is_null() {
+            r.as_object_mut().unwrap().remove("publication_review");
+            c.update(r, t)?;
+        }
+    } else if t["agent_review_policy"] != "auto" && !r["publication_review"].is_null() {
+        r.as_object_mut().unwrap().remove("publication_review");
+        c.update(r, t)?;
+    }
+    Ok(())
+}
+
+// Persist the reviewed content and publication together before removing its checkout.
+pub fn bind_publication(c: &Context, t: &Value, r: &mut Value) -> Result<()> {
+    if t["agent_review_policy"] != "auto" && r["publication_review"].is_null() {
+        return Ok(());
+    }
+    let data = load(c, r)?;
+    let a = data["attempts"]
+        .as_array()
+        .and_then(|v| v.last())
+        .ok_or_else(|| anyhow!("Нет принятого ревью"))?;
+    ensure!(a["status"] == "passed", "Нет passed ревью");
+    ensure!(
+        r["publication_review"]["id"] == a["id"]
+            && r["publication_review"]["version"] == a["version"]
+            && r["publication_review"]["submission"] == r["result_revision"],
+        "Связь ревью с публикацией утрачена"
+    );
+    let frozen = verify(c, a)?;
+    let current = snapshot(c, t, r, None)?;
+    ensure!(
+        frozen["manifest"]["files"] == current["manifest"]["files"]
+            && frozen["manifest"]["task"] == current["manifest"]["task"]
+            && frozen["manifest"]["project"] == current["manifest"]["project"]
+            && frozen["manifest"]["submission"] == current["manifest"]["submission"],
+        "Результат изменился при публикации; требуется новое ревью"
+    );
+    ensure!(
+        r["git_completion"]["status"] == "completed",
+        "Публикация не подтверждена"
+    );
+    r["accepted_review"] = json!({"id":a["id"],"version":a["version"],"submission":r["result_revision"],"publication":r["git_completion"]});
+    Ok(())
 }

@@ -947,6 +947,154 @@ class ControlTests(unittest.TestCase):
         (wt / "new-file").write_text("dirty")
         self.cli("review-claim", "--run", r["id"], "--id", b["id"], "--actor", "agent", ok=False)
 
+    def test_completed_review_remains_fresh_after_worktree_cleanup(self):
+        repo, wt, r = self.code_review()
+        self.cli('task-set', 'task1', '--agent-review-policy', 'auto')
+        a = self.cli('review-request', '--run', r['id'])
+        self.cli('review-claim', '--run', r['id'], '--id', a['id'], '--actor', 'agent')
+        verdict = self.root / 'verdict.json'
+        verdict.write_text(json.dumps(dict(version=a['version'], status='passed', conclusion='OK',
+            findings=[], suggestions=[], evidence=['Checked'], limitations=[])))
+        self.cli('review-conclude', '--run', r['id'], '--id', a['id'], '--actor', 'agent', '--result', str(verdict))
+        self.cli('review-release', '--run', r['id'], '--id', a['id'], '--actor', 'agent', '--evidence', 'Finished')
+        frozen = json.loads(Path(a['snapshot']).read_text())
+        item = next(iter(frozen['manifest']['files'].values()))
+        blob = Path(a['snapshot']).parent / item['blob']
+        original = blob.read_bytes()
+        blob.write_text('corrupt')
+        self.cli('complete', 'task1', '--commit-message', 'Save task changes', ok=False)
+        self.assertEqual(self.git(wt, 'rev-parse', 'HEAD'), self.git(repo, 'rev-parse', 'HEAD'))
+        blob.write_bytes(original)
+        self.cli('complete', 'task1', '--commit-message', 'Save task changes')
+        self.assertFalse(wt.exists())
+        view = self.cli('review-show', '--run', r['id'])
+        self.assertFalse(view['attempts'][-1]['stale'])
+        self.assertEqual(view['handoff']['action'], 'present_result')
+        self.cli('complete', 'task1')
+        blob.write_text('corrupt')
+        self.cli('review-show', '--run', r['id'], ok=False)
+
+    def test_review_show_reports_missing_active_worktree(self):
+        repo, wt, r = self.code_review()
+        self.cli('review-request', '--run', r['id'])
+        self.git(repo, 'worktree', 'remove', '--force', str(wt))
+        self.cli('review-show', '--run', r['id'], ok=False)
+
+    def test_completed_no_code_review_and_legacy_limit(self):
+        r = self.review()
+        self.cli('task-set', 'task1', '--agent-review-policy', 'auto')
+        a = self.cli('review-request', '--run', r['id'])
+        self.cli('review-claim', '--run', r['id'], '--id', a['id'], '--actor', 'agent')
+        verdict = self.root / 'verdict.json'
+        verdict.write_text(json.dumps(dict(version=a['version'], status='passed', conclusion='OK',
+            findings=[], suggestions=[], evidence=['Checked'], limitations=[])))
+        self.cli('review-conclude', '--run', r['id'], '--id', a['id'], '--actor', 'agent', '--result', str(verdict))
+        self.cli('review-release', '--run', r['id'], '--id', a['id'], '--actor', 'agent', '--evidence', 'Finished')
+        self.cli('complete', 'task1')
+        self.assertFalse(self.cli('review-show', '--run', r['id'])['attempts'][-1]['stale'])
+        state_file = self.root / 'runs' / r['id'] / 'state.json'
+        state = json.loads(state_file.read_text()); state.pop('accepted_review')
+        state_file.write_text(json.dumps(state))
+        error = self.cli('review-show', '--run', r['id'], ok=False)
+        self.assertIn('legacy', error['error'])
+
+    def test_completed_manual_review_remains_available(self):
+        repo, wt, r = self.code_review()
+        a = self.cli('review-request', '--run', r['id'])
+        self.cli('review-claim', '--run', r['id'], '--id', a['id'], '--actor', 'agent')
+        verdict = self.root / 'verdict.json'
+        verdict.write_text(json.dumps(dict(version=a['version'], status='passed', conclusion='OK',
+            findings=[], suggestions=[], evidence=['Checked'], limitations=[])))
+        self.cli('review-conclude', '--run', r['id'], '--id', a['id'], '--actor', 'agent', '--result', str(verdict))
+        self.cli('review-release', '--run', r['id'], '--id', a['id'], '--actor', 'agent', '--evidence', 'Finished')
+        self.cli('complete', 'task1', '--commit-message', 'Save task changes')
+        self.assertFalse(self.cli('review-show', '--run', r['id'])['attempts'][-1]['stale'])
+
+    def test_manual_publish_reports_corrupt_review(self):
+        repo, wt, r = self.code_review()
+        a = self.cli('review-request', '--run', r['id'])
+        self.cli('review-claim', '--run', r['id'], '--id', a['id'], '--actor', 'agent')
+        verdict = self.root / 'verdict.json'
+        verdict.write_text(json.dumps(dict(version=a['version'], status='passed', conclusion='OK',
+            findings=[], suggestions=[], evidence=['Checked'], limitations=[])))
+        self.cli('review-conclude', '--run', r['id'], '--id', a['id'], '--actor', 'agent', '--result', str(verdict))
+        frozen = json.loads(Path(a['snapshot']).read_text())
+        item = next(iter(frozen['manifest']['files'].values()))
+        (Path(a['snapshot']).parent / item['blob']).write_text('corrupt')
+        error = self.cli('git-publish', 'task1', '--commit-message', 'Save task changes', ok=False)
+        self.assertIn('blob', error['error'])
+        self.assertEqual(self.git(wt, 'rev-parse', 'HEAD'), self.git(repo, 'rev-parse', 'HEAD'))
+
+    def test_published_review_remains_fresh_until_content_changes(self):
+        repo, wt, r = self.code_review()
+        self.cli('task-set', 'task1', '--agent-review-policy', 'auto')
+        a = self.cli('review-request', '--run', r['id'])
+        self.cli('review-claim', '--run', r['id'], '--id', a['id'], '--actor', 'agent')
+        verdict = self.root / 'verdict.json'
+        verdict.write_text(json.dumps(dict(version=a['version'], status='passed', conclusion='OK',
+            findings=[], suggestions=[], evidence=['Checked'], limitations=[])))
+        self.cli('review-conclude', '--run', r['id'], '--id', a['id'], '--actor', 'agent', '--result', str(verdict))
+        self.cli('git-publish', 'task1', '--commit-message', 'Save task changes')
+        self.assertFalse(self.cli('review-show', '--run', r['id'])['attempts'][-1]['stale'])
+        (wt / 'added.txt').write_text('changed')
+        self.assertTrue(self.cli('review-show', '--run', r['id'])['attempts'][-1]['stale'])
+        self.cli('complete', 'task1', '--commit-message', 'Save further changes', ok=False)
+
+    def test_auto_complete_retries_failed_push(self):
+        repo, wt, r = self.code_review(remote=True)
+        self.cli('task-set', 'task1', '--agent-review-policy', 'auto')
+        a = self.cli('review-request', '--run', r['id'])
+        self.cli('review-claim', '--run', r['id'], '--id', a['id'], '--actor', 'agent')
+        verdict = self.root / 'verdict.json'
+        verdict.write_text(json.dumps(dict(version=a['version'], status='passed', conclusion='OK',
+            findings=[], suggestions=[], evidence=['Checked'], limitations=[])))
+        self.cli('review-conclude', '--run', r['id'], '--id', a['id'], '--actor', 'agent', '--result', str(verdict))
+        self.cli('review-release', '--run', r['id'], '--id', a['id'], '--actor', 'agent', '--evidence', 'Finished')
+        hook = self.root / 'origin.git/hooks/pre-receive'
+        hook.write_text('#!/bin/sh\nexit 1\n'); hook.chmod(0o755)
+        self.cli('complete', 'task1', '--commit-message', 'Save task changes', ok=False)
+        hook.unlink()
+        self.cli('complete', 'task1')
+        self.assertFalse(self.cli('review-show', '--run', r['id'])['attempts'][-1]['stale'])
+
+    def test_corrupt_passed_review_blocks_show_and_cleanup_retry(self):
+        repo, wt, r = self.code_review()
+        self.cli('task-set', 'task1', '--agent-review-policy', 'auto')
+        a = self.cli('review-request', '--run', r['id'])
+        self.cli('review-claim', '--run', r['id'], '--id', a['id'], '--actor', 'agent')
+        verdict = self.root / 'verdict.json'
+        verdict.write_text(json.dumps(dict(version=a['version'], status='passed', conclusion='OK',
+            findings=[], suggestions=[], evidence=['Checked'], limitations=[])))
+        self.cli('review-conclude', '--run', r['id'], '--id', a['id'], '--actor', 'agent', '--result', str(verdict))
+        self.cli('review-release', '--run', r['id'], '--id', a['id'], '--actor', 'agent', '--evidence', 'Finished')
+        failure = self.fail_worktree_remove(wt)
+        self.cli('complete', 'task1', '--commit-message', 'Save task changes', ok=False)
+        frozen = json.loads(Path(a['snapshot']).read_text())
+        item = next(iter(frozen['manifest']['files'].values()))
+        (Path(a['snapshot']).parent / item['blob']).write_text('corrupt')
+        self.cli('review-show', '--run', r['id'], ok=False)
+        failure.unlink()
+        self.cli('complete', 'task1', ok=False)
+        self.assertTrue(wt.exists())
+        self.assertEqual(self.cli('show', 'tasks', 'task1')['status'], 'review')
+
+    def test_manual_changed_after_publish_has_no_old_review_binding(self):
+        repo, wt, r = self.code_review()
+        a = self.cli('review-request', '--run', r['id'])
+        self.cli('review-claim', '--run', r['id'], '--id', a['id'], '--actor', 'agent')
+        verdict = self.root / 'verdict.json'
+        verdict.write_text(json.dumps(dict(version=a['version'], status='passed', conclusion='OK',
+            findings=[], suggestions=[], evidence=['Checked'], limitations=[])))
+        self.cli('review-conclude', '--run', r['id'], '--id', a['id'], '--actor', 'agent', '--result', str(verdict))
+        self.cli('review-release', '--run', r['id'], '--id', a['id'], '--actor', 'agent', '--evidence', 'Finished')
+        self.cli('git-publish', 'task1', '--commit-message', 'Save task changes')
+        (wt / 'added.txt').write_text('new version')
+        self.assertTrue(self.cli('review-show', '--run', r['id'])['attempts'][-1]['stale'])
+        self.cli('git-publish', 'task1', '--commit-message', 'Save new content')
+        self.assertTrue(self.cli('review-show', '--run', r['id'])['attempts'][-1]['stale'])
+        self.assertEqual(self.cli('complete', 'task1')['status'], 'done')
+        self.assertIn('legacy', self.cli('review-show', '--run', r['id'], ok=False)['error'])
+
     def test_agent_review_stale_pending_and_symlink(self):
         self.create()
         r = self.start()

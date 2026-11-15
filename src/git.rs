@@ -203,6 +203,7 @@ pub fn complete_code(
 ) -> Result<()> {
     if r["worktree_cleanup"].is_null() {
         publish_code(c, t, r, message)?;
+        crate::review::bind_publication(c, t, r)?;
         r["worktree_cleanup"] = json!({"status":"pending","submission":r["result_revision"],"review_policy":t["agent_review_policy"]});
     }
     if r["worktree_cleanup"]["status"] == "completed" {
@@ -483,6 +484,7 @@ pub fn publish_code(
     r: &mut Value,
     message: Option<&str>,
 ) -> Result<()> {
+    crate::review::prepare_publication(c, t, r)?;
     if r["git_completion"].is_null() {
         r["git_completion"] = json!({"status":"pending","repositories":[],"git_mode":t["git_mode"].as_str().unwrap_or("main")});
     }

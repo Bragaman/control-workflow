@@ -2156,11 +2156,20 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
     {
         guard_recovered_candidate(c, &t, r)?;
     }
+
+    if let Some(r) = &r
+        && status == "done"
+        && !r["worktree_cleanup"].is_null()
+        && (t["agent_review_policy"] == "auto" || !r["accepted_review"].is_null())
+    {
+        crate::review::verify_publication_binding(c, r)?;
+    }
     if let Some(r) = &mut r
         && status == "done"
-        && git::complete_code(c, &mut t, r, a["commit_message"].as_str()).is_err()
+        && let Err(error) = git::complete_code(c, &mut t, r, a["commit_message"].as_str())
     {
         let mut result = json!({"task":t["id"],"status":t["status"],"next":"Код и таб сохранены; устраните причину и повторите complete"});
+        result["error"] = json!(error.to_string());
         result["git_completion"] = r["git_completion"].clone();
         result["worktree_cleanup"] = r["worktree_cleanup"].clone();
         return Ok(result);
@@ -2253,12 +2262,21 @@ pub fn publish(c: &Context, a: &Value) -> Result<Value> {
         r["worktree_cleanup"].is_null(),
         "Удаление worktree уже началось; повторите complete"
     );
-    let _result = git::publish_code(c, &mut t, &mut r, a["commit_message"].as_str());
+    git::publish_code(c, &mut t, &mut r, a["commit_message"].as_str())?;
     let after = crate::review::snapshot(c, &t, &r, None)?;
-    if before["manifest"]["files"] == after["manifest"]["files"] {
+    if before["manifest"]["files"] == after["manifest"]["files"]
+        && r["publication_review"]["id"].is_string()
+        && r["publication_review"]["submission"] == r["result_revision"]
+    {
         r["published_review_version"] = after["version"].clone();
-        c.update(&mut r, &mut t)?;
+        r["published_review"] = r["publication_review"].clone();
+    } else {
+        r.as_object_mut()
+            .unwrap()
+            .remove("published_review_version");
+        r.as_object_mut().unwrap().remove("published_review");
     }
+    c.update(&mut r, &mut t)?;
     Ok(
         json!({"task":t["id"],"run":r["id"],"status":t["status"],"git_completion":r["git_completion"]}),
     )
