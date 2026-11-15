@@ -34,6 +34,8 @@ NATIVE_FILES = {'build.rs', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
                                'external.rs', 'git.rs', 'lib.rs', 'lifecycle.rs',
                                'main.rs', 'mcp.rs', 'policy.rs', 'resources.rs', 'review.rs', 'schedule.rs', 'shipping.rs', 'store.rs')}
 ALLOWLIST |= NATIVE_FILES
+ALLOWLIST |= {'mkdocs.yml', 'requirements-docs.txt', 'scripts/prepare_docs.py',
+              '.github/workflows/docs.yml'}
 # The original license placeholder remains valid only in preserved historical trees.
 HISTORY_ALLOWLIST = ALLOWLIST | {'LICENSE.pending'}
 ALLOWLIST -= {'scripts/' + name + '.py' for name in SCRIPTS if name != 'release_audit'}

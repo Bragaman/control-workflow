@@ -33,6 +33,29 @@ python3 scripts/release_audit.py
 Он не гарантирует обнаружения произвольного секрета; метаданные Git проверяй
 отдельно перед публикацией.
 
+## Сайт документации
+
+Сайт собирается MkDocs из README, docs и связанных skills/examples/config.
+Единственные поддерживаемые исходники остаются на прежних местах. Скрипт берёт
+публичные файлы из distribution.json и создаёт временное дерево target/docs-src;
+генерируемые файлы не коммитятся. Сборка не меняет комплект ресурсов CLI.
+
+```sh
+python3 -m venv target/docs-venv
+. target/docs-venv/bin/activate
+python -m pip install -r requirements-docs.txt
+python scripts/prepare_docs.py
+python -m mkdocs build --strict
+python -m mkdocs serve
+```
+
+После изменения исходников повтори prepare_docs.py. Статический результат находится
+в target/site. Зависимости сайта закреплены отдельно от runtime и проверок Rust.
+Workflow documentation проверяет сборку в PR и публикует main через GitHub Actions
+на [GitHub Pages](https://bragaman.github.io/control-workflow/). В настройках Pages
+выбран источник GitHub Actions; ручной workflow_dispatch повторяет публикацию main.
+Навигация задаётся в mkdocs.yml, поиск работает локально в браузере.
+
 ## Самостоятельная поставка и MCP
 
 Бинарник встраивает docs/skills/config/examples. Создай пакет в новом каталоге
