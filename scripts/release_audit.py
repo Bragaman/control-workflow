@@ -26,10 +26,10 @@ ALLOWLIST = ({'README.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', '.gitignore',
              {'docs/' + name + '.md' for name in DOCS} |
              {'skills/control-' + name + '/SKILL.md' for name in SKILLS} |
              {'tests/test_' + name + '.py' for name in ('control', 'runtime', 'public')})
-NATIVE_FILES = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
+NATIVE_FILES = {'build.rs', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
                 '.github/workflows/rust.yml', 'docs/rust.md', 'tests/native.rs',
                 'tests/test_native.py', 'tests/test_mcp.py', 'tests/test_interop.py',
-                'tests/test_model_policy.py', 'tests/mcp_client.py'} | {
+                'tests/test_model_policy.py', 'tests/test_build_version.py', 'tests/mcp_client.py'} | {
     'src/' + name for name in ('args.rs', 'casefold.rs', 'commands.json', 'config.rs', 'core.rs',
                                'external.rs', 'git.rs', 'lib.rs', 'lifecycle.rs',
                                'main.rs', 'mcp.rs', 'policy.rs', 'resources.rs', 'review.rs', 'schedule.rs', 'shipping.rs', 'store.rs')}

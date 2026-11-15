@@ -7,7 +7,7 @@ pub fn registry() -> Vec<Value> {
 }
 pub fn cli() -> Command {
     let mut cmd = Command::new("control-workflow")
-        .version(env!("CARGO_PKG_VERSION"))
+        .version(env!("CONTROL_WORKFLOW_BUILD_VERSION"))
         .about("Контрольная панель: native CLI / MCP stdio")
         .subcommand_required(true);
     for key in [

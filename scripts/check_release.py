@@ -24,7 +24,7 @@ def main():
             if path.is_absolute() or '..' in path.parts or hashlib.sha256((root / path).read_bytes()).hexdigest() != expected:
                 raise ValueError(f'Invalid package file: {name}')
         binary = subprocess.check_output([str(root / 'bin/control-workflow'), '--version'], text=True).strip()
-        if binary != f"control-workflow {manifest['version']}":
+        if binary != f"control-workflow {manifest['version']}" and not binary.startswith(f"control-workflow {manifest['version']} (commit "):
             raise ValueError('Package binary and manifest versions differ')
         print('Package manifest verified')
         return

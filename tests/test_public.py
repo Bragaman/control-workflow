@@ -113,9 +113,8 @@ class PublicInstallTests(unittest.TestCase):
         self.call(BINARY, 'package', '--prefix', package)
         script = prefix / 'bin/control-workflow'
         manifest = prefix / 'distribution-rust.json'
-        old = json.loads(manifest.read_text()); old['version'] = '0.0.0'
+        old = json.loads(manifest.read_text()); version = old['version']; old['version'] = '0.0.0'
         manifest.write_text(json.dumps(old))
-        version = self.call(BINARY, '--version').stdout.strip().split()[-1]
         tag = 'v' + version
         arch = 'aarch64' if platform.machine() == 'arm64' else platform.machine()
         platform_name = ('macos' if sys.platform == 'darwin' else 'linux') + '-' + arch
