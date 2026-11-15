@@ -1456,6 +1456,69 @@
     ]
   },
   {
+    "name": "recover-publication",
+    "options": [
+      {
+        "name": "id",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "repository",
+        "flags": [
+          "--repository"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "commit",
+        "flags": [
+          "--commit"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "review",
+        "flags": [
+          "--review"
+        ],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "by",
+        "flags": [
+          "--by"
+        ],
+        "required": false,
+        "default": "user",
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
     "name": "complete",
     "options": [
       {

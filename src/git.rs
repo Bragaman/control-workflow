@@ -120,6 +120,18 @@ pub(crate) fn validate_worktree(item: &Value) -> Result<()> {
     );
     validate_operation(wt)
 }
+/// A clean status can hide tracked changes behind index flags.
+pub(crate) fn validate_index_flags(wt: &Path) -> Result<()> {
+    let entries = git(wt, &["ls-files", "-v", "-z"], false)?;
+    ensure!(
+        entries
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .all(|entry| entry.starts_with("H ")),
+        "Индекс скрывает отслеживаемые изменения; снимите skip-worktree и assume-unchanged"
+    );
+    Ok(())
+}
 fn checkpoint(c: &Context, t: &mut Value, r: &mut Value) -> Result<()> {
     c.update(r, t)?;
     let dir = c.run_file(s(r, "id"))?.parent().unwrap().to_path_buf();
@@ -678,4 +690,190 @@ fn validate_secret_files(wt: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Replace a failed candidate only when no publication of it can be observed.
+pub fn recover_candidate(
+    c: &Context,
+    t: &mut Value,
+    r: &mut Value,
+    a: &Value,
+    frozen: &Value,
+) -> Result<()> {
+    ensure!(
+        r["worktree_cleanup"].is_null(),
+        "Удаление worktree уже началось"
+    );
+    ensure!(
+        r["git_completion"]["status"] == "failed",
+        "Восстанавливается только неудачная публикация"
+    );
+    ensure!(
+        r["git_completion"]["attempts"]
+            .as_array()
+            .and_then(|v| v.last())
+            .is_some_and(|v| v["status"] == "failed"),
+        "Исход последней попытки не подтверждён; нужна сверка процесса Git"
+    );
+    ensure!(
+        r["git_completion"]["git_mode"].as_str().unwrap_or("main")
+            == t["git_mode"].as_str().unwrap_or("main"),
+        "Git-режим изменён"
+    );
+    let repo_name = s(a, "repository");
+    let requested = s(a, "commit");
+    let items = r["git_completion"]["repositories"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Нет журнала репозиториев"))?;
+    let indexes: Vec<_> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| s(v, "repository") == repo_name)
+        .map(|(i, _)| i)
+        .collect();
+    ensure!(
+        indexes.len() == 1,
+        "Репозиторий должен однозначно соответствовать журналу"
+    );
+    let i = indexes[0];
+    let item = items[i].clone();
+    let saved = r["worktrees"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|v| s(v, "repository") == repo_name)
+        .collect::<Vec<_>>();
+    ensure!(
+        saved.len() == 1
+            && ["path", "branch", "main_branch"]
+                .iter()
+                .all(|k| saved[0][*k] == item[*k]),
+        "Worktree не соответствует запуску"
+    );
+    ensure!(
+        item["published"] != true
+            && item["removed"] != true
+            && item["main_commit"].is_null()
+            && item["remote_commit"].is_null(),
+        "Возможна частичная публикация; нужна отдельная сверка"
+    );
+    let current = s(&item, "commit");
+    let prior = r["git_completion"]["recoveries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .rev()
+        .find(|v| v["commit"] == requested && v["previous"]["repository"] == repo_name);
+    let repeated = current == requested && prior.is_some_and(|v| v["review"] == a["review"]);
+    let old = if current == requested {
+        let previous =
+            prior.ok_or_else(|| anyhow::anyhow!("Нет записи предыдущего восстановления"))?;
+        previous["old_commit"]
+            .as_str()
+            .unwrap_or_else(|| s(&previous["previous"], "commit"))
+    } else {
+        current
+    };
+    ensure!(
+        !old.is_empty() && old != requested,
+        "Нужен новый commit вместо сохранённого"
+    );
+    let wt = Path::new(s(&item, "path"));
+    let repo = Path::new(repo_name);
+    validate_worktree(&item)?;
+    validate_secret_files(wt)?;
+    validate_index_flags(wt)?;
+    ensure!(
+        git(wt, &["status", "--porcelain"], false)?.is_empty(),
+        "Worktree содержит изменения"
+    );
+    ensure!(
+        git(wt, &["rev-parse", "HEAD"], false)? == requested,
+        "Укажите полный текущий commit worktree"
+    );
+    let reviewed = frozen["manifest"]["repositories"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|v| {
+            v["repository"] == repo_name
+                && v["path"] == item["path"]
+                && v["head"] == requested
+                && s(v, "status").trim().is_empty()
+        })
+        .count();
+    ensure!(reviewed == 1, "Commit не соответствует снимку ревью");
+    git(
+        repo,
+        &["cat-file", "-e", &format!("{old}^{{commit}}")],
+        false,
+    )?;
+    ensure!(
+        ["push_branch", "merge_main"].contains(&s(&item, "mode")) && item["origin"].is_boolean(),
+        "Неполный журнал Git; нужна сверка"
+    );
+    let expected_mode = if t["git_mode"] == "branch"
+        && item["origin"] == true
+        && item["branch"] != item["main_branch"]
+    {
+        "push_branch"
+    } else {
+        "merge_main"
+    };
+    ensure!(
+        item["mode"] == expected_mode,
+        "Режим репозитория не соответствует Git-политике"
+    );
+    let has_origin = git(repo, &["remote"], false)?
+        .lines()
+        .any(|v| v == "origin");
+    ensure!(
+        has_origin == (item["origin"] == true),
+        "Настройка origin изменилась"
+    );
+    let branch = if item["mode"] == "push_branch" {
+        s(&item, "branch")
+    } else {
+        s(&item, "main_branch")
+    };
+    ensure!(!branch.is_empty(), "Неизвестная ветка публикации");
+    let local = git(
+        repo,
+        &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
+        false,
+    )?;
+    // A missing or failed merge-base is ambiguous and must not authorize recovery.
+    let base = git(repo, &["merge-base", old, &local], false)?;
+    ensure!(base != old, "Прежний commit присутствует в целевой ветке");
+    if item["origin"] == true {
+        let remote = git(
+            repo,
+            &["ls-remote", "origin", &format!("refs/heads/{branch}")],
+            false,
+        )?;
+        if item["mode"] == "push_branch" {
+            ensure!(
+                remote.is_empty(),
+                "Удалённая ветка уже существует; нужна сверка"
+            );
+        } else {
+            ensure!(
+                remote.split_whitespace().next() == Some(local.as_str()),
+                "Удалённая ветка не совпадает с локальной; нужна сверка"
+            );
+        }
+    }
+    if repeated {
+        return checkpoint(c, t, r);
+    }
+    let entry = json!({"at":store::now(), "by":a["by"], "review":a["review"], "version":frozen["version"], "previous":item, "old_commit":old, "commit":requested, "target_head":local});
+    if !r["git_completion"]["recoveries"].is_array() {
+        r["git_completion"]["recoveries"] = json!([]);
+    }
+    r["git_completion"]["recoveries"]
+        .as_array_mut()
+        .unwrap()
+        .push(entry);
+    r["git_completion"]["repositories"][i]["commit"] = json!(requested);
+    checkpoint(c, t, r)
 }

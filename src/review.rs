@@ -1209,3 +1209,124 @@ pub fn guard_publish(c: &Context, t: &Value, r: &Value) -> Result<()> {
     );
     Ok(())
 }
+
+/// Require a current, intact passed snapshot without the publication shortcut.
+pub fn recovery_review(c: &Context, t: &Value, r: &Value, id: &str) -> Result<Value> {
+    let data = load(c, r)?;
+    let last = data["attempts"]
+        .as_array()
+        .and_then(|v| v.last())
+        .ok_or_else(|| anyhow!("Нет агентского ревью"))?;
+    ensure!(
+        last["id"] == id && last["status"] == "passed",
+        "Требуется последнее passed ревью"
+    );
+    let frozen = verify(c, last)?;
+    ensure!(
+        snapshot(c, t, r, None)?["version"] == last["version"],
+        "Ревью устарело"
+    );
+    Ok(frozen)
+}
+
+/// Permit the known fast-forward made by this recovery when a later push failed.
+pub fn recovery_review_after_fast_forward(
+    c: &Context,
+    t: &Value,
+    r: &Value,
+    recovery: &Value,
+) -> Result<Value> {
+    let data = load(c, r)?;
+    let last = data["attempts"]
+        .as_array()
+        .and_then(|v| v.last())
+        .ok_or_else(|| anyhow!("Нет агентского ревью"))?;
+    ensure!(
+        last["id"] == recovery["review"]
+            && last["status"] == "passed"
+            && last["version"] == recovery["version"],
+        "Требуется последнее passed ревью"
+    );
+    let frozen = verify(c, last)?;
+    let mut current = snapshot(c, t, r, None)?;
+    if current["version"] == last["version"] {
+        return Ok(frozen);
+    }
+    let original = frozen["manifest"]["repositories"]
+        .as_array()
+        .ok_or_else(|| anyhow!("Нет репозиториев снимка"))?;
+    let repos = current["manifest"]["repositories"]
+        .as_array_mut()
+        .ok_or_else(|| anyhow!("Нет текущих репозиториев"))?;
+    let items = r["git_completion"]["repositories"]
+        .as_array()
+        .ok_or_else(|| anyhow!("Нет журнала репозиториев"))?;
+    ensure!(
+        original.len() == repos.len(),
+        "Состав репозиториев изменился"
+    );
+    let mut matched = 0;
+    for (now, before) in repos.iter_mut().zip(original) {
+        if now["base"] == before["base"] {
+            continue;
+        }
+        let candidates: Vec<_> = items
+            .iter()
+            .filter(|v| v["repository"] == before["repository"] && v["path"] == before["path"])
+            .collect();
+        ensure!(
+            candidates.len() == 1,
+            "Репозиторий не соответствует журналу"
+        );
+        let item = candidates[0];
+        let worktrees: Vec<_> = r["worktrees"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|v| {
+                v["repository"] == item["repository"]
+                    && v["path"] == item["path"]
+                    && v["branch"] == item["branch"]
+                    && v["main_branch"] == item["main_branch"]
+            })
+            .collect();
+        ensure!(
+            worktrees.len() == 1
+                && item["mode"] == "merge_main"
+                && item["commit"] == before["head"]
+                && now["head"] == before["head"]
+                && now["base"] == before["head"]
+                && s(before, "status").trim().is_empty()
+                && s(now, "status").trim().is_empty(),
+            "Нельзя подтвердить fast-forward после ревью"
+        );
+        let repo = Path::new(s(item, "repository"));
+        let head = crate::git::git(
+            repo,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("refs/heads/{}", s(item, "main_branch")),
+            ],
+            false,
+        )?;
+        ensure!(
+            head == s(before, "head"),
+            "Основная ветка изменилась после проверки"
+        );
+        if item["repository"] == recovery["previous"]["repository"] {
+            ensure!(
+                item["commit"] == recovery["commit"] && before["base"] == recovery["target_head"],
+                "Не подтверждён кандидат восстановления"
+            );
+        }
+        now["base"] = before["base"].clone();
+        now["diff"] = before["diff"].clone();
+        matched += 1;
+    }
+    ensure!(
+        matched > 0 && current["manifest"] == frozen["manifest"],
+        "Ревью устарело или состояние неоднозначно"
+    );
+    Ok(frozen)
+}

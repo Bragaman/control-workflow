@@ -2134,12 +2134,27 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
     }
     if status == "done"
         && let Some(r) = &r
+    {
+        ensure!(
+            !active_recovery(r) || r["worktree_cleanup"].is_null(),
+            "Публикация и удаление worktree имеют противоречивое состояние"
+        );
+    }
+    if status == "done"
+        && let Some(r) = &r
         && t["status"] == "review"
         && t["agent_review_policy"] == "auto"
+        && !active_recovery(r)
         && (r["worktree_cleanup"].is_null()
             || r["worktree_cleanup"]["review_policy"] != t["agent_review_policy"])
     {
         crate::review::guard_publish(c, &t, r)?;
+    }
+    if status == "done"
+        && let Some(r) = &r
+        && r["worktree_cleanup"].is_null()
+    {
+        guard_recovered_candidate(c, &t, r)?;
     }
     if let Some(r) = &mut r
         && status == "done"
@@ -2229,7 +2244,10 @@ pub fn publish(c: &Context, a: &Value) -> Result<Value> {
             .ok_or_else(|| anyhow!("Сохранённая панель отсутствует"))?;
         require_terminal(&r, pane)?;
     }
-    crate::review::guard_publish(c, &t, &r)?;
+    if !active_recovery(&r) {
+        crate::review::guard_publish(c, &t, &r)?;
+    }
+    guard_recovered_candidate(c, &t, &r)?;
     let before = crate::review::snapshot(c, &t, &r, None)?;
     ensure!(
         r["worktree_cleanup"].is_null(),
@@ -2244,4 +2262,65 @@ pub fn publish(c: &Context, a: &Value) -> Result<Value> {
     Ok(
         json!({"task":t["id"],"run":r["id"],"status":t["status"],"git_completion":r["git_completion"]}),
     )
+}
+
+/// Reassign one failed, unpublished Git candidate; this never publishes code.
+pub fn recover_publication(c: &Context, a: &Value) -> Result<Value> {
+    let mut t = c.task(s(a, "id"))?;
+    ensure!(
+        t["status"] == "review" && t["reviewer"] == a["by"],
+        "Требуется назначенный приёмщик и задача в review"
+    );
+    let mut r = c.current(&t, s(&t, "active_run"))?;
+    ensure!(
+        r["status"] == "review" && t["code"] == true,
+        "Нужен кодовый результат в review"
+    );
+    let request = request_file(c, &r)?;
+    if request.exists() {
+        let pending = c.read(&request)?;
+        ensure!(
+            !["pending", "running"].contains(&s(&pending, "status")),
+            "Исход фонового запроса завершения не подтверждён; нужна сверка"
+        );
+    }
+    let frozen = crate::review::recovery_review(c, &t, &r, s(a, "review"))?;
+    git::recover_candidate(c, &mut t, &mut r, a, &frozen)?;
+    Ok(
+        json!({"task":t["id"], "run":r["id"], "status":t["status"], "git_completion":r["git_completion"]}),
+    )
+}
+
+fn active_recovery(r: &Value) -> bool {
+    r["git_completion"]["status"] != "completed"
+        && r["git_completion"]["recoveries"]
+            .as_array()
+            .is_some_and(|v| !v.is_empty())
+}
+fn guard_recovered_candidate(c: &Context, t: &Value, r: &Value) -> Result<()> {
+    if !active_recovery(r) {
+        return Ok(());
+    }
+    if let Some(last) = r["git_completion"]["recoveries"]
+        .as_array()
+        .and_then(|v| v.last())
+    {
+        ensure!(
+            r["git_completion"]["attempts"]
+                .as_array()
+                .and_then(|v| v.last())
+                .is_some_and(|v| v["status"] == "failed"),
+            "Исход последней попытки не подтверждён; нужна сверка процесса Git"
+        );
+        for wt in r["worktrees"].as_array().into_iter().flatten() {
+            git::validate_worktree(wt)?;
+            git::validate_index_flags(Path::new(s(wt, "path")))?;
+        }
+        let frozen = crate::review::recovery_review_after_fast_forward(c, t, r, last)?;
+        ensure!(
+            frozen["version"] == last["version"],
+            "Ревью восстановленного кандидата изменилось"
+        );
+    }
+    Ok(())
 }

@@ -156,6 +156,10 @@ pub fn execute(c: &Context, name: &str, a: &Value) -> Result<Value> {
             let _lock = c.lock()?;
             lifecycle::complete(c, a)
         }
+        "recover-publication" => {
+            let _lock = c.lock()?;
+            lifecycle::recover_publication(c, a)
+        }
         name if name.starts_with("review-") => {
             let _lock = c.lock()?;
             review::handle(c, name, a)
