@@ -411,6 +411,205 @@ class ControlTests(unittest.TestCase):
             self.assertIsNone(compact[field])
         self.assertEqual(compact["stage"], "running")
 
+    def test_compact_stages_and_current_failures(self):
+        r = self.review()
+        directory = self.root / 'runs' / r['id']
+        path = directory / 'state.json'
+        original = json.loads(path.read_text())
+        (directory / 'questions.json').write_text(json.dumps({'question': 'Какой вариант выбрать?'}))
+        for stage in ('launching', 'running', 'blocked', 'review', 'done', 'cancelled'):
+            state = dict(original, status=stage)
+            path.write_text(json.dumps(state))
+            summary = self.cli('run', r['id'], '--compact')['result_summary']
+            self.assertEqual(summary['development']['status'], stage)
+            self.assertTrue(summary['next_step'])
+            self.assertEqual(summary['installation']['status'], 'unknown')
+            self.assertEqual(summary['running_process']['status'], 'unknown')
+            if stage == 'blocked':
+                self.assertTrue(any(b['status'] == 'blocked' for b in summary['blockers']))
+                self.assertTrue(any(b['detail'] == 'Какой вариант выбрать?' for b in summary['blockers']))
+        state = dict(original, git_completion={'status': 'failed', 'error': 'push failed',
+                     'attempts': [{'status': 'failed'}]},
+                     worktree_cleanup={'status': 'running'})
+        path.write_text(json.dumps(state))
+        summary = self.cli('run', r['id'], '--compact')['result_summary']
+        self.assertEqual(summary['publication']['status'], 'failed')
+        self.assertIn('push failed', json.dumps(summary))
+        self.assertEqual(summary['cleanup']['status'], 'running')
+        state['git_completion'] = {'status': 'completed', 'repositories': [],
+                                   'first_error': 'old error', 'attempts': [{'error': 'old error'}]}
+        state['worktree_cleanup'] = {'status': 'completed', 'first_error': 'old error'}
+        path.write_text(json.dumps(state))
+        summary = self.cli('run', r['id'], '--compact')['result_summary']
+        self.assertEqual(summary['publication']['status'], 'completed')
+        self.assertNotIn('old error', json.dumps(summary))
+        self.assertEqual(summary['publication']['current'], 'unknown')
+
+    def test_compact_does_not_grow_with_report_or_history(self):
+        r = self.review()
+        directory = self.root / 'runs' / r['id']
+        path = directory / 'state.json'
+        state = json.loads(path.read_text())
+        lengths = []
+        for count in (1, 100):
+            state['git_completion'] = {'status': 'failed', 'error': 'failure',
+                                       'attempts': [{'error': 'x' * 2000}] * count}
+            path.write_text(json.dumps(state))
+            (directory / 'report.md').write_text('x' * (count * 3000))
+            compact = self.cli('run', r['id'], '--compact')
+            lengths.append(len(json.dumps(compact, ensure_ascii=False).encode()))
+            self.assertIn('failure', json.dumps(compact))
+        self.assertEqual(lengths[0], lengths[1])
+        self.assertEqual(len(self.cli('run', r['id'])['git_completion']['attempts']), 100)
+
+    def test_compact_review_changes_are_a_current_blocker(self):
+        r, _ = self.agent_review_changes()
+        summary = self.cli('run', r['id'], '--compact')['result_summary']
+        self.assertEqual(summary['review']['status'], 'changes_requested')
+        self.assertIn('Нужны исправления', summary['review']['error'])
+        self.assertEqual(summary['review']['findings'], ['Исправить ошибку'])
+        self.assertTrue(any(b['status'] == 'changes_requested' for b in summary['blockers']))
+
+    def test_compact_review_freshness_for_unfinished_and_changes_requested(self):
+        run = self.review()
+        attempt = self.cli('review-request', '--run', run['id'])
+        result_file = self.root / 'runs' / run['id'] / 'result.md'
+        original = result_file.read_text()
+
+        def check(expected_status):
+            result_file.write_text(original)
+            review = self.cli('run', run['id'], '--compact')['result_summary']['review']
+            self.assertEqual(review['status'], expected_status)
+            self.assertIs(review['stale'], False)
+            result_file.write_text('changed after review request')
+            compact = self.cli('run', run['id'], '--compact')['result_summary']
+            view = self.cli('review-show', '--run', run['id'], '--latest')['attempts'][-1]
+            self.assertEqual(compact['review']['status'], expected_status)
+            self.assertIs(view['stale'], True)
+            self.assertIs(compact['review']['stale'], True)
+            self.assertTrue(any(b['source'] == 'agent-review.json' and b['stale'] is True
+                                for b in compact['blockers']))
+            if expected_status == 'changes_requested':
+                self.assertIn('--user-requested', compact['next_step'])
+                self.cli('review-feedback', '--run', run['id'], '--id', attempt['id'], ok=False)
+            result_file.write_text(original)
+
+        check('pending')
+        backup = result_file.with_suffix('.saved')
+        result_file.rename(backup)
+        unavailable = self.cli('run', run['id'], '--compact')['result_summary']
+        self.assertEqual(unavailable['review']['status'], 'pending')
+        self.assertIsNone(unavailable['review']['stale'])
+        self.assertTrue(unavailable['review']['freshness_error'])
+        self.assertTrue(any(b['status'] == 'unknown' for b in unavailable['blockers']))
+        backup.rename(result_file)
+        self.cli('review-claim', '--run', run['id'], '--id', attempt['id'], '--actor', 'agent')
+        check('running')
+        verdict = self.root / 'verdict.json'
+        verdict.write_text(json.dumps(dict(version=attempt['version'], status='changes_requested',
+            conclusion='Fix it', findings=['Required change'], suggestions=[], evidence=['Checked'], limitations=[])))
+        self.cli('review-conclude', '--run', run['id'], '--id', attempt['id'], '--actor', 'agent', '--result', str(verdict))
+        check('changes_requested')
+        self.assertEqual(self.cli('run', run['id'], '--compact')['result_summary']['review']['findings'], ['Required change'])
+
+    def test_compact_does_not_probe_remote_publication(self):
+        repo, wt, r = self.code_review()
+        path = self.root / 'runs' / r['id'] / 'state.json'
+        state = json.loads(path.read_text())
+        state['git_completion'] = {'status': 'completed', 'repositories': [{
+            'path': str(wt), 'repository': str(repo), 'origin': True,
+            'branch': 'feature', 'main_branch': 'main', 'commit': 'fake', 'main_commit': 'fake'}]}
+        path.write_text(json.dumps(state))
+        git_dir = self.root / 'git-wrapper'
+        git_dir.mkdir()
+        git_log = git_dir / 'calls'
+        real_git = subprocess.run(['which', 'git'], capture_output=True, text=True, check=True).stdout.strip()
+        wrapper = git_dir / 'git'
+        wrapper.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> ' + shlex.quote(str(git_log)) +
+                           '\nexec ' + shlex.quote(real_git) + ' "$@"\n')
+        wrapper.chmod(0o755)
+        env = dict(self.env, PATH=str(git_dir) + os.pathsep + self.env['PATH'])
+        summary = self.cli('run', r['id'], '--compact', env=env)['result_summary']
+        self.assertEqual(summary['publication']['current'], 'unknown')
+        self.assertFalse(git_log.exists() and 'ls-remote' in git_log.read_text())
+
+    def test_compact_cancel_after_failed_push_keeps_partial_publication_limit(self):
+        _, _, run = self.code_review(remote=True)
+        hook = self.root / 'origin.git/hooks/pre-receive'
+        hook.write_text('#!/bin/sh\nexit 1\n')
+        hook.chmod(0o755)
+        self.cli('complete', 'task1', '--commit-message', 'Test publication', ok=False)
+        self.cli('complete', 'task1', '--status', 'cancelled')
+        summary = self.cli('run', run['id'], '--compact')['result_summary']
+        self.assertEqual(summary['publication']['status'], 'cancelled')
+        self.assertIn('частичную публикацию', summary['publication']['limitation'])
+        self.assertFalse(any(b['source'] == 'git_completion' for b in summary['blockers']))
+        self.assertNotIn('завершить публикацию', summary['next_step'])
+        self.assertEqual(self.cli('run', run['id'])['git_completion']['status'], 'failed')
+
+    def test_compact_cancel_after_interrupted_push_requires_reconciliation(self):
+        import signal
+        _, _, run = self.code_review(remote=True)
+        marker = self.root / 'push-entered'
+        hook = self.root / 'origin.git/hooks/pre-receive'
+        hook.write_text('#!/bin/sh\ntouch ' + shlex.quote(str(marker)) + '\nwhile :; do sleep 1; done\n')
+        hook.chmod(0o755)
+        proc = subprocess.Popen([str(BINARY), 'complete', 'task1', '--commit-message', 'Test interrupted push'],
+                                env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                start_new_session=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not marker.exists():
+                self.assertIsNone(proc.poll(), 'complete stopped before entering push')
+                self.assertLess(time.monotonic(), deadline, 'push did not reach hook')
+                time.sleep(.03)
+        finally:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate(timeout=10)
+        self.cli('complete', 'task1', '--status', 'cancelled')
+        path = self.root / 'runs' / run['id'] / 'state.json'
+        state = json.loads(path.read_text())
+        self.assertEqual(state['git_completion']['status'], 'pending')
+        for status in ('pending', 'running'):
+            state['git_completion']['status'] = status
+            path.write_text(json.dumps(state))
+            summary = self.cli('run', run['id'], '--compact')['result_summary']
+            self.assertEqual(summary['publication']['status'], status)
+            self.assertEqual(summary['publication']['current'], 'unknown')
+            self.assertIn('частичную публикацию', summary['publication']['limitation'])
+            self.assertTrue(any(b['source'] == 'git_completion' for b in summary['blockers']))
+            self.assertIn('Сверить исход прерванной публикации', summary['next_step'])
+
+    def test_compact_cancel_retry_clears_only_resolved_request(self):
+        run = self.review()
+        self.env.update(HERDR_PANE_ID='w7:p1', FAKE_CLOSE_FAIL='1')
+        self.cli('complete', 'task1', '--status', 'cancelled')
+        self.wait_completion(run, 'failed')
+        failed = self.cli('run', run['id'], '--compact')['result_summary']
+        self.assertTrue(any(b['source'] == 'completion-request.json' for b in failed['blockers']))
+        del self.env['FAKE_CLOSE_FAIL']
+        del self.env['HERDR_PANE_ID']
+        self.cli('complete', 'task1', '--status', 'cancelled')
+        summary = self.cli('run', run['id'], '--compact')['result_summary']
+        self.assertFalse(any(b['source'] == 'completion-request.json' for b in summary['blockers']))
+        self.assertEqual(summary['cleanup']['terminal_status'], 'closed')
+
+    def test_compact_reopened_task_does_not_inherit_old_acceptance(self):
+        old = self.review()
+        self.cli('accept', 'task1', '--by', 'user')
+        accepted = self.cli('run', old['id'], '--compact')['result_summary']['acceptance']
+        self.assertEqual(accepted['status'], 'accepted')
+        self.assertIsNotNone(accepted['at'])
+        self.cli('task-set', 'task1', '--status', 'ready')
+        reopened = self.cli('run', old['id'], '--compact')['result_summary']['acceptance']
+        self.assertEqual(reopened, {'status': 'not_accepted', 'at': None})
+        new = self.start()
+        self.assertNotEqual(new['id'], old['id'])
+        summary = self.cli('run', new['id'], '--compact')['result_summary']
+        self.assertEqual(summary['development']['status'], 'running')
+        self.assertEqual(summary['acceptance'], {'status': 'not_accepted', 'at': None})
+
     def test_memory_pages_include_shared_and_keep_legacy_list(self):
         for project, title in [('lab', 'Тема один'), ('shared', 'Тема два'), ('lab', 'Другое')]:
             self.cli('memory-add', '--project', project, '--title', title, '--text', 'Факт')
@@ -916,6 +1115,11 @@ class ControlTests(unittest.TestCase):
         f = self.root / "runs" / r["id"] / "agent-review.json"
         state = json.loads(f.read_text()); state["attempts"][-1]["deadline"] = "2000-01-01T00:00:00+00:00"
         f.write_text(json.dumps(state))
+        before = f.read_bytes()
+        compact = self.cli('run', r['id'], '--compact')['result_summary']
+        self.assertEqual(compact['review']['status'], 'failed')
+        self.assertIn('Истёк срок', compact['review']['error'])
+        self.assertEqual(f.read_bytes(), before)
         self.assertEqual(self.cli("review-show", "--run", r["id"])["attempts"][-1]["status"], "failed")
         self.cli("review-request", "--run", r["id"], ok=False)
         b = self.cli("review-request", "--run", r["id"], "--user-requested")
@@ -940,8 +1144,10 @@ class ControlTests(unittest.TestCase):
             findings=[], suggestions=[], evidence=["Тесты"], limitations=[])))
         self.assertEqual(self.cli("review-conclude", "--run", r["id"], "--id", a["id"], "--actor", "agent", "--result", str(result))["status"], "passed")
         self.assertFalse(self.cli("review-show", "--run", r["id"])["attempts"][-1]["stale"])
+        self.assertEqual(self.cli('run', r['id'], '--compact')['result_summary']['review']['status'], 'passed')
         (wt / "new-file").write_text("untracked")
         self.assertTrue(self.cli("review-show", "--run", r["id"])["attempts"][-1]["stale"])
+        self.assertEqual(self.cli('run', r['id'], '--compact')['result_summary']['review']['status'], 'stale')
         b = self.cli("review-request", "--run", r["id"])
         self.assertNotEqual(a["version"], b["version"])
         (wt / "new-file").write_text("dirty")
@@ -969,10 +1175,14 @@ class ControlTests(unittest.TestCase):
         self.assertFalse(wt.exists())
         view = self.cli('review-show', '--run', r['id'])
         self.assertFalse(view['attempts'][-1]['stale'])
+        self.assertEqual(self.cli('run', r['id'], '--compact')['result_summary']['review']['status'], 'passed')
         self.assertEqual(view['handoff']['action'], 'present_result')
         self.cli('complete', 'task1')
         blob.write_text('corrupt')
         self.cli('review-show', '--run', r['id'], ok=False)
+        summary = self.cli('run', r['id'], '--compact')['result_summary']
+        self.assertEqual(summary['review']['status'], 'unknown')
+        self.assertTrue(any(b['source'] == 'agent-review.json' for b in summary['blockers']))
 
     def test_review_show_reports_missing_active_worktree(self):
         repo, wt, r = self.code_review()
@@ -997,6 +1207,9 @@ class ControlTests(unittest.TestCase):
         state_file.write_text(json.dumps(state))
         error = self.cli('review-show', '--run', r['id'], ok=False)
         self.assertIn('legacy', error['error'])
+        summary = self.cli('run', r['id'], '--compact')['result_summary']
+        self.assertEqual(summary['review']['status'], 'unknown')
+        self.assertIn('legacy', summary['review']['error'])
 
     def test_completed_manual_review_remains_available(self):
         repo, wt, r = self.code_review()
@@ -1230,9 +1443,48 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(out['handoff']['action'], 'report_review_failure')
         self.assertFalse(out['handoff']['ready_for_user'])
         self.assertTrue((self.root / 'runs' / r['id'] / 'agent-review-error.json').exists())
+        compact = self.cli('run', r['id'], '--compact')['result_summary']
+        self.assertEqual(compact['review']['status'], 'unknown')
+        self.assertIn('Не удалось запросить ревью', compact['review']['error'])
         notices = self.cli('notifications')
         self.assertTrue(any(n['title'].startswith('Сбой агентского ревью') for n in notices))
         self.assertFalse(any(n['title'].startswith('Готово к приёмке') for n in notices))
+
+    def test_compact_review_snapshot_failure_uses_current_submission(self):
+        r, previous = self.agent_review_changes()
+        self.cli('task-set', 'task1', '--agent-review-policy', 'auto')
+        self.cli('review-feedback', '--run', r['id'], '--id', previous['id'])
+        self.cli('review-feedback', '--run', r['id'], '--id', previous['id'], '--delivered')
+        report = self.root / 'fixed.md'
+        report.write_text('Fixed result')
+        artifact = self.root / 'missing-artifact'
+        finished = self.cli('finish', '--run', r['id'], '--report', str(report), '--artifact', str(artifact))
+        self.assertEqual(finished['handoff']['action'], 'report_review_failure')
+        error_file = self.root / 'runs' / r['id'] / 'agent-review-error.json'
+        error = json.loads(error_file.read_text())
+        self.assertEqual(error['submission'], previous['submission'] + 1)
+        summary = self.cli('run', r['id'], '--compact')['result_summary']
+        self.assertEqual(summary['review']['status'], 'unknown')
+        self.assertIn('Не удалось запросить ревью текущей сдачи', summary['review']['error'])
+        self.assertNotIn('Исправить ошибку', json.dumps(summary, ensure_ascii=False))
+        legacy = dict(error)
+        legacy.pop('submission')
+        error_file.write_text(json.dumps(legacy))
+        summary = self.cli('run', r['id'], '--compact')['result_summary']
+        self.assertEqual(summary['review']['status'], 'unknown')
+        self.assertIn('legacy', summary['review']['error'])
+        old_error = dict(error, submission=previous['submission'])
+        error_file.write_text(json.dumps(old_error))
+        summary = self.cli('run', r['id'], '--compact')['result_summary']
+        self.assertEqual(summary['review']['status'], 'unknown')
+        self.assertIn('Нет подтверждённой попытки', summary['review']['error'])
+        error_file.write_text(json.dumps(error))
+        artifact.write_text('Now available')
+        current = self.cli('review-request', '--run', r['id'])
+        self.assertEqual(current['submission'], error['submission'])
+        summary = self.cli('run', r['id'], '--compact')['result_summary']
+        self.assertEqual(summary['review']['status'], 'pending')
+        self.assertIsNone(summary['review']['error'])
 
     def test_execution_profiles_reach_codex_and_run(self):
         cases = (("research", "normal", "fixture-analysis", "medium"),
@@ -2598,7 +2850,7 @@ class ControlTests(unittest.TestCase):
         self.cli("finish", "--run", r["id"], "--report", str(report))
         return r
 
-    def test_compact_result_exposes_later_report_and_historical_timeout(self):
+    def test_compact_result_keeps_reports_in_full_output_and_historical_timeout(self):
         r = self.review()
         directory = self.root / 'runs' / r['id']
         (directory / 'report.md').write_text('Проверенный результат\n\n## Выпуск\nОпубликовано и проверено.\n')
@@ -2609,8 +2861,11 @@ class ControlTests(unittest.TestCase):
         compact = self.cli('run', r['id'], '--compact')
         self.assertNotIn('startup_error', compact)
         self.assertEqual(compact['historical_startup_error'], 'timeout')
-        self.assertIn('Опубликовано и проверено.', compact['result_summary']['latest_report_section'])
-        self.assertEqual(compact['result_summary']['report'], str(directory / 'report.md'))
+        self.assertNotIn('Опубликовано и проверено.', json.dumps(compact, ensure_ascii=False))
+        self.assertEqual(compact['result_summary']['publication']['status'], 'not_started')
+        full = self.cli('run', r['id'])['result_summary']
+        self.assertIn('Опубликовано и проверено.', full['latest_report_section'])
+        self.assertEqual(full['report'], str(directory / 'report.md'))
 
     def test_cancelled_unconfirmed_start_error_is_not_historical(self):
         self.create()
@@ -2638,14 +2893,18 @@ class ControlTests(unittest.TestCase):
     def test_compact_result_after_repeat_complete_keeps_evidence(self):
         r = self.review()
         directory = self.root / 'runs' / r['id']
-        (directory / 'current-result.md').write_text('Установлено; проверка: evidence.json')
+        (directory / 'current-result.md').write_text('Установлено; проверка: evidence.json; работает старый процесс')
         self.cli('complete', 'task1', '--note', 'Принято')
         self.cli('complete', 'task1')
         summary = self.cli('run', r['id'], '--compact')['result_summary']
-        self.assertEqual(summary['acceptance']['note'], 'Принято')
-        self.assertIn('evidence.json', summary['current_result_text'])
-        self.assertEqual(Path(summary['development_result']).read_text(), 'Проверенный результат')
-        self.assertEqual(self.cli('open', 'task1')[0]['result_summary'], summary)
+        self.assertEqual(summary['acceptance']['status'], 'accepted')
+        self.assertEqual(summary['installation']['status'], 'unknown')
+        self.assertEqual(summary['running_process']['status'], 'unknown')
+        full = self.cli('run', r['id'])['result_summary']
+        self.assertEqual(full['acceptance']['note'], 'Принято')
+        self.assertIn('evidence.json', full['current_result_text'])
+        self.assertEqual(Path(full['development_result']).read_text(), 'Проверенный результат')
+        self.assertEqual(self.cli('open', 'task1')[0]['result_summary']['acceptance'], summary['acceptance'])
 
     def test_session_capture_does_not_adopt_replaced_terminal(self):
         if self.env.get('FAKE_KIND') == 'claude':

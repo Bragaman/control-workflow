@@ -793,7 +793,7 @@ fn summary(c: &Context, t: &Value, r: Option<&Value>, action: &str) -> Result<Va
     let dir = if let Some(r) = r {
         extend(&mut v, core::run_context(r));
         if action == "result" {
-            v["result_summary"] = core::result_summary(c, r)?;
+            v["result_summary"] = core::compact_summary(c, r)?;
         }
         extend(
             &mut v,

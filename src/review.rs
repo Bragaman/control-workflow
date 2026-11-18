@@ -334,6 +334,123 @@ fn load(c: &Context, r: &Value) -> Result<Value> {
     Ok(data)
 }
 
+// Shared with review-show: archived runs use the accepted publication binding,
+// because their original worktree may have already been removed.
+fn observed_version(c: &Context, t: &Value, r: &Value) -> Result<(Value, bool)> {
+    let archived = t["status"] == "done" && r["status"] == "done";
+    let version = if archived {
+        ensure!(
+            t["accepted"]["by"].is_string() && t["accepted"]["by"] == t["reviewer"],
+            "Нет подтверждённой приёмки"
+        );
+        verify_publication_binding(c, r)?;
+        r["accepted_review"]["version"].clone()
+    } else {
+        snapshot(c, t, r, None)?["version"].clone()
+    };
+    Ok((version, archived))
+}
+
+fn attempt_stale(r: &Value, a: &Value, last: &Value, version: &Value, archived: bool) -> bool {
+    *version != a["version"]
+        && (archived
+            || r["published_review_version"] != *version
+            || r["published_review"]["id"] != a["id"]
+            || r["published_review"]["version"] != a["version"]
+            || r["published_review"]["submission"] != r["result_revision"]
+            || last["id"] != a["id"])
+}
+
+/// Observe only the latest verdict without changing state or returning its history.
+pub fn compact_status(c: &Context, t: &Value, r: &Value) -> Result<Value> {
+    let file = review_file(c, r)?;
+    let data = if file.exists() {
+        c.read(&file)?
+    } else {
+        json!({"attempts": []})
+    };
+    let attempts = data["attempts"]
+        .as_array()
+        .ok_or_else(|| anyhow!("Некорректный журнал ревью"))?;
+    let last = attempts.last();
+    let revision = r["result_revision"].as_u64();
+    let current_attempt =
+        last.is_some_and(|a| revision.is_some() && a["submission"].as_u64() == revision);
+    if !current_attempt {
+        let error_file = file.with_file_name("agent-review-error.json");
+        if error_file.exists() {
+            let error = c.read(&error_file)?;
+            let error_revision = error["submission"].as_u64();
+            if error_revision.is_none() || revision.is_none() {
+                bail!(
+                    "Ошибка запроса ревью не привязана к сдаче (legacy): {}",
+                    s(&error, "error")
+                );
+            }
+            if error_revision == revision {
+                bail!(
+                    "Не удалось запросить ревью текущей сдачи: {}",
+                    s(&error, "error")
+                );
+            }
+        }
+        if last.is_some() {
+            bail!(
+                "Нет подтверждённой попытки ревью текущей сдачи; проверьте историю и result_revision (возможно legacy)"
+            );
+        }
+        if r["status"] == "done" && t["agent_review_policy"] == "auto" {
+            bail!("Нет данных принятого ревью (legacy)");
+        }
+        return Ok(json!({"status": "not_requested"}));
+    }
+    let a = last.expect("current attempt exists");
+    let mut status = s(a, "status").to_owned();
+    ensure!(
+        [
+            "pending",
+            "running",
+            "passed",
+            "failed",
+            "changes_requested"
+        ]
+        .contains(&status.as_str()),
+        "Неизвестный статус ревью"
+    );
+    let timed_out = status == "running"
+        && chrono::DateTime::parse_from_rfc3339(s(a, "deadline"))?.with_timezone(&chrono::Utc)
+            <= chrono::Utc::now();
+    if timed_out {
+        status = "failed".to_owned();
+    }
+    if status == "passed" {
+        verify(c, a)?;
+    }
+    let (stale, freshness_error) = match observed_version(c, t, r) {
+        Ok((version, archived)) => (
+            Some(attempt_stale(r, a, a, &version, archived)),
+            Value::Null,
+        ),
+        Err(e) if status == "passed" => return Err(e),
+        Err(e) => (None, crate::core::bounded(&json!(e.to_string()))),
+    };
+    if status == "passed" && stale == Some(true) {
+        status = "stale".to_owned();
+    }
+    let findings = a["result"]["findings"].as_array();
+    let shown = findings
+        .into_iter()
+        .flatten()
+        .take(3)
+        .map(crate::core::bounded)
+        .collect::<Vec<_>>();
+    Ok(
+        json!({"status":status,"id":a["id"],"observed_at":a["finished_at"].as_str().or_else(|| a["created_at"].as_str()),"source":file,
+            "error": if timed_out { json!("Истёк срок subagent; требуется новый запрос") } else if ["failed", "changes_requested"].contains(&status.as_str()) { crate::core::bounded(if a["conclusion"].is_string() { &a["conclusion"] } else { &a["result"]["conclusion"] }) } else { Value::Null },
+            "findings":shown,"findings_truncated":findings.is_some_and(|v| v.len() > 3),"stale":stale,"freshness_error":freshness_error}),
+    )
+}
+
 const MAX_AUTOMATIC_RETURNS: usize = 3;
 
 pub fn handoff(c: &Context, a: &Value, cycles: usize) -> Value {
@@ -716,33 +833,21 @@ pub fn handle(c: &Context, name: &str, args: &Value) -> Result<Value> {
                     .collect(),
             );
         }
-        let archived = t["status"] == "done" && r["status"] == "done";
-        let version = if archived {
-            ensure!(
-                t["accepted"]["by"].is_string() && t["accepted"]["by"] == t["reviewer"],
-                "Нет подтверждённой приёмки"
-            );
-            verify_publication_binding(c, &r)?;
-            r["accepted_review"]["version"].clone()
-        } else {
-            snapshot(c, &t, &r, None)?["version"].clone()
-        };
+        let (version, archived) = observed_version(c, &t, &r)?;
         for a in view["attempts"].as_array_mut().unwrap() {
             if a["status"] == "passed" {
                 verify(c, a)?;
             }
-            a["stale"] = json!(
-                version != a["version"]
-                    && (archived
-                        || r["published_review_version"] != version
-                        || r["published_review"]["id"] != a["id"]
-                        || r["published_review"]["version"] != a["version"]
-                        || r["published_review"]["submission"] != r["result_revision"]
-                        || data["attempts"]
-                            .as_array()
-                            .and_then(|v| v.last())
-                            .is_none_or(|last| last["id"] != a["id"]))
-            );
+            a["stale"] = json!(attempt_stale(
+                &r,
+                a,
+                data["attempts"]
+                    .as_array()
+                    .and_then(|v| v.last())
+                    .unwrap_or(&Value::Null),
+                &version,
+                archived
+            ));
         }
         if t["agent_review_policy"] == "auto" {
             view["handoff"] = handoff(

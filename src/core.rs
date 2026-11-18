@@ -126,6 +126,188 @@ pub(crate) fn result_summary(c: &Context, r: &Value) -> Result<Value> {
     }
     Ok(summary)
 }
+
+pub(crate) fn bounded(v: &Value) -> Value {
+    v.as_str()
+        .map(|s| {
+            let text: String = s.chars().take(500).collect();
+            if s.chars().count() > 500 {
+                json!(format!("{text}…"))
+            } else {
+                json!(text)
+            }
+        })
+        .unwrap_or(Value::Null)
+}
+
+/// A bounded observation of structured state. Reports remain available in the full run.
+pub(crate) fn compact_summary(c: &Context, r: &Value) -> Result<Value> {
+    let t = c.task(s(r, "task"))?;
+    let current = t["active_run"] == r["id"];
+    let status = s(r, "status");
+    let cancelled = current && status == "cancelled" && t["status"] == "cancelled";
+    let review = if !current && ["review", "done", "cancelled"].contains(&status) {
+        json!({"status":"unknown","error":"Задача уже связана с другим запуском; актуальность прежнего ревью требует отдельной проверки"})
+    } else if ["review", "done", "cancelled"].contains(&status) {
+        review::compact_status(c, &t, r)
+            .unwrap_or_else(|e| json!({"status":"unknown","error":bounded(&json!(e.to_string()))}))
+    } else {
+        json!({"status":"not_started"})
+    };
+    let acceptance = if !current {
+        "unknown"
+    } else if status == "done"
+        && t["status"] == "done"
+        && t["accepted"]["by"].is_string()
+        && t["accepted"]["by"] == t["reviewer"]
+    {
+        "accepted"
+    } else if status == "cancelled" {
+        "cancelled"
+    } else {
+        "not_accepted"
+    };
+    let publication_recorded = if r["git_completion"].is_null() {
+        "not_started"
+    } else {
+        r["git_completion"]["status"].as_str().unwrap_or("unknown")
+    };
+    let publication = if cancelled && publication_recorded == "failed" {
+        "cancelled"
+    } else {
+        publication_recorded
+    };
+    let cleanup = if r["worktree_cleanup"].is_null() {
+        "not_started"
+    } else {
+        r["worktree_cleanup"]["status"]
+            .as_str()
+            .unwrap_or("unknown")
+    };
+    let mut blockers = Vec::new();
+    if status == "blocked" {
+        let file = c.run_file(s(r, "id"))?.with_file_name("questions.json");
+        let detail = match c.read(&file) {
+            Ok(question) if question["question"].is_string() => bounded(&question["question"]),
+            Ok(_) => json!("Текст вопроса отсутствует; проверьте questions.json"),
+            Err(e) => bounded(&json!(format!("Вопрос недоступен: {e}"))),
+        };
+        blockers.push(json!({"source":"questions.json","status":"blocked","detail":detail}));
+    }
+    let startup = run_context(r);
+    if !startup["current_startup_error"].is_null() {
+        blockers.push(json!({"source":"startup_error","status":"failed","detail":bounded(&startup["current_startup_error"])}));
+    }
+    if status == "launching" && r["launcher_status"] == "unknown" {
+        blockers.push(json!({"source":"launcher_status","status":"unknown","detail":"Видимость подготовителя неизвестна; исполнитель отдельно не подтверждён"}));
+    }
+    if ["launch_failed", "interrupted"].contains(&status) {
+        blockers.push(json!({"source":"state.json","status":status,"detail":bounded(&r["error"])}));
+    }
+    if !r["error"].is_null() && !["launch_failed", "interrupted"].contains(&status) {
+        blockers
+            .push(json!({"source":"state.json","status":"error","detail":bounded(&r["error"])}));
+    }
+    for (name, item) in [
+        ("git_completion", &r["git_completion"]),
+        ("worktree_cleanup", &r["worktree_cleanup"]),
+        ("cleanup", &r["cleanup"]),
+    ] {
+        let state = s(item, "status");
+        if ["pending", "running", "failed"].contains(&state)
+            && !(name == "git_completion" && cancelled && state == "failed")
+        {
+            blockers.push(json!({"source":name,"status":state,"detail":bounded(&item["error"])}));
+        }
+    }
+    if [
+        "pending",
+        "running",
+        "failed",
+        "changes_requested",
+        "stale",
+        "unknown",
+    ]
+    .contains(&s(&review, "status"))
+    {
+        blockers.push(json!({"source":"agent-review.json","status":review["status"],"detail":review["error"],"findings":review["findings"],"findings_truncated":review["findings_truncated"],"stale":review["stale"]}));
+    }
+    if !review["freshness_error"].is_null() {
+        blockers.push(json!({"source":"agent-review.json","status":"unknown","detail":review["freshness_error"]}));
+    }
+    let request_file = c
+        .run_file(s(r, "id"))?
+        .with_file_name("completion-request.json");
+    let request_record = if request_file.exists() {
+        match c.read(&request_file) {
+            Ok(v) => v,
+            Err(e) => {
+                blockers.push(json!({"source":"completion-request.json","status":"unknown","detail":bounded(&json!(e.to_string()))}));
+                Value::Null
+            }
+        }
+    } else {
+        Value::Null
+    };
+    let request = &request_record;
+    if ["pending", "running", "failed"].contains(&s(request, "status")) {
+        // A completed cleanup of the same target supersedes a failed request.
+        let resolved = request["status"] == "failed"
+            && current
+            && t["status"] == status
+            && request["target_status"] == status
+            && ["done", "cancelled"].contains(&status)
+            && ["closed", "no_tab"].contains(&s(&r["cleanup"], "status"));
+        if !resolved {
+            blockers.push(json!({"source":"completion-request.json","status":request["status"],"detail":bounded(&request["error"]),"process_alive":r["completion_process_alive"]}));
+        }
+    }
+    let cancelled_inflight_publication =
+        cancelled && ["pending", "running"].contains(&publication_recorded);
+    let next = if status == "blocked" {
+        "Ответить на вопрос запуска"
+    } else if ["launch_failed", "interrupted"].contains(&status) {
+        "Сверить исполнителя и восстановить запуск по docs/recovery.md"
+    } else if cancelled_inflight_publication {
+        "Сверить исход прерванной публикации и возможные изменения"
+    } else if ["pending", "running", "failed"].contains(&publication) {
+        "Разобрать или завершить публикацию по полному состоянию запуска"
+    } else if ["pending", "running", "failed"].contains(&cleanup) {
+        "Разобрать или завершить очистку worktree по полному состоянию запуска"
+    } else if status == "review"
+        && review["stale"] == true
+        && review["status"] == "changes_requested"
+    {
+        "Согласовать с пользователем возврат по устаревшим замечаниям через review-feedback --user-requested"
+    } else if status == "review" && review["stale"] == true {
+        "Сверить состояние ревьюера и подготовить актуальное ревью"
+    } else if !blockers.is_empty() {
+        "Разобрать действующее препятствие по подробностям запуска"
+    } else if status == "review"
+        && review["status"] == "not_requested"
+        && t["agent_review_policy"] == "auto"
+    {
+        "Запросить агентское ревью"
+    } else if status == "review" {
+        "Передать результат назначенному приёмщику"
+    } else if status == "done" {
+        "Приёмка завершена; установка и работающий процесс требуют отдельного подтверждения"
+    } else if status == "cancelled" {
+        "Работа отменена; проверить сохранённые артефакты"
+    } else if status == "running" {
+        "Проверить исполнителя и его прогресс"
+    } else {
+        "Сверить состояние подготовки и исполнителя"
+    };
+    Ok(
+        json!({"development":{"status":status,"result_ready":(["review", "done"].contains(&status)),"executor":"unknown"},"review":review,
+        "acceptance":{"status":acceptance,"at":if acceptance == "accepted" { &t["accepted"]["at"] } else { &Value::Null }},
+        "publication":{"status":publication,"current":"unknown","source":"git_completion (без проверки удалённой стороны)","limitation":if cancelled && ["failed", "pending", "running"].contains(&publication_recorded) { Some("Отмена не откатывает возможную частичную публикацию; см. полный журнал") } else { None }},
+        "cleanup":{"status":cleanup,"terminal_status":r["cleanup"]["status"]},"installation":{"status":"unknown"},"running_process":{"status":"unknown"},
+        "blockers":blockers,"next_step":next,"observation":{"at":now(),"state_updated_at":r["updated_at"],"task_status":t["status"],"current_run":current,"source":"state.json, task и agent-review.json; локальная проверка актуальности снимка"},
+        "details":{"run":format!("run {}",s(r,"id")),"review":format!("review-show --run {} --latest",s(r,"id")),"directory":c.run_file(s(r,"id"))?.parent()}}),
+    )
+}
 /// Executes one command. Multi-step lifecycle operations own their lock scopes.
 pub fn execute(c: &Context, name: &str, a: &Value) -> Result<Value> {
     crate::args::validate(name, a)?;
@@ -358,7 +540,7 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
                 r = c.read(&c.run_file(id)?)?;
                 lifecycle::reconcile_launcher(c, &mut r)?;
             }
-            if !r["git_completion"].is_null() {
+            if !r["git_completion"].is_null() && a["compact"] != true {
                 r["git_publication_current"] =
                     json!(crate::git::publication_current(&r).unwrap_or(false));
             }
@@ -411,9 +593,22 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
                     ],
                 );
                 extend(&mut v, run_context(&r));
-                if ["review", "done", "cancelled"].contains(&s(&r, "status")) {
-                    v["result_summary"] = result_summary(c, &r)?;
+                v["last_action"] = if r["status"] == "running" {
+                    bounded(&r["progress"])
+                } else {
+                    Value::Null
+                };
+                for field in [
+                    "error",
+                    "current_startup_error",
+                    "historical_startup_error",
+                    "launcher_diagnostic",
+                ] {
+                    if !v[field].is_null() {
+                        v[field] = bounded(&v[field]);
+                    }
                 }
+                v["result_summary"] = compact_summary(c, &r)?;
                 v["details"] = json!(format!("run {id}"));
                 v["files"] = json!({});
                 for n in [
@@ -733,7 +928,7 @@ fn worker(c: &Context, name: &str, a: &Value) -> Result<Value> {
                 agent_review = match review::request(c, &t, &r, false) {
                     Ok(v) => v,
                     Err(e) => {
-                        let v = json!({"status":"failed","error":e.to_string()});
+                        let v = json!({"status":"failed","error":e.to_string(),"submission":r["result_revision"],"at":now()});
                         c.save(&dir.join("agent-review-error.json"), &v)?;
                         v
                     }
