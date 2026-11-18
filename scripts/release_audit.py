@@ -16,7 +16,7 @@ DOCS = ('worker', 'planning', 'control-entry', 'git-policy', 'recovery', 'runtim
         'agent-review', 'install', 'architecture', 'compatibility', 'questions', 'task-profile',
         'model-policy', 'schedules')
 SKILLS = ('list', 'project', 'task', 'start', 'review', 'complete', 'git-publish', 'memory', 'sync', 'update')
-ALLOWLIST = ({'README.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', '.gitignore',
+ALLOWLIST = ({'README.md', 'CHANGELOG.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', '.gitignore',
               'config/defaults.json', 'config/model-policy.json',
               'pyproject.toml', 'requirements-dev.txt', 'scripts/check.sh', 'scripts/check_release.py', 'scripts/install.sh',
               'examples/config-codex.json', 'examples/config-claude.json',

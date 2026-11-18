@@ -179,6 +179,7 @@ pub fn install(c: &Context, prefix: &str, package: bool) -> Result<Value> {
         false,
     )?;
     write("README.md", include_bytes!("../README.md"), false)?;
+    write("CHANGELOG.md", include_bytes!("../CHANGELOG.md"), false)?;
     write("LICENSE", include_bytes!("../LICENSE"), false)?;
     store::save_raw(
         &stage.path().join("distribution-rust.json"),
