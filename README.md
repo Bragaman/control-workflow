@@ -4,8 +4,8 @@
 агент выполняет её в отдельном терминале, а вы проверяете результат и принимаете работу.
 Планы, отчёты и состояние сохраняются в файлах — к задаче можно вернуться после перерыва.
 
-[Начать работу](https://bragaman.github.io/control-workflow/docs/guide/installation/){ .md-button .md-button--primary }
-[Первая задача](https://bragaman.github.io/control-workflow/docs/guide/first-task/){ .md-button }
+<a href="https://bragaman.github.io/control-workflow/docs/guide/installation/" class="md-button md-button--primary">Начать работу</a>
+<a href="https://bragaman.github.io/control-workflow/docs/guide/first-task/" class="md-button">Первая задача</a>
 
 ![Вы выбираете задачу, управляющий открывает исполнителя, исполнитель передаёт результат на проверку. Принимает работу пользователь.](docs/guide/assets/roles.svg)
 
