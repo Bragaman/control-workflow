@@ -454,12 +454,15 @@ pub fn agent_state(c: &Context, r: &Value) -> Result<&'static str> {
         },
     )
 }
-pub fn mark_recovered(c: &Context, r: &mut Value, t: &mut Value) -> Result<()> {
-    capture_session(c, r);
+fn confirm_agent_start(r: &mut Value) {
     r["agent_start_completed"] = json!(true);
     r.as_object_mut()
         .unwrap()
         .remove("startup_confirmation_pending");
+}
+pub fn mark_recovered(c: &Context, r: &mut Value, t: &mut Value) -> Result<()> {
+    capture_session(c, r);
+    confirm_agent_start(r);
     if let Some(error) = r.as_object_mut().unwrap().remove("error") {
         r["startup_error"] = error;
     }
@@ -892,9 +895,18 @@ fn open_one(c: &Context, id: &str, requested: Option<&str>) -> Result<Value> {
                     crate::review::guard_restart(c, &t)?;
                     mark_recovered(c, &mut r, &mut t)?;
                     action = "recovered";
-                } else if r["agent_session"].is_null() {
-                    capture_session(c, &mut r);
-                    if !r["agent_session"].is_null() {
+                } else {
+                    let confirm_start = r["startup_confirmation_pending"] == true
+                        || (r["worker_start_confirmed"] == true
+                            && r["agent_start_completed"] != true);
+                    let capture = r["agent_session"].is_null();
+                    if capture {
+                        capture_session(c, &mut r);
+                    }
+                    if confirm_start {
+                        confirm_agent_start(&mut r);
+                    }
+                    if confirm_start || (capture && !r["agent_session"].is_null()) {
                         c.update(&mut r, &mut t)?;
                     }
                 }
@@ -946,6 +958,16 @@ pub fn open(c: &Context, a: &Value) -> Result<Value> {
     Ok(Value::Array(results))
 }
 
+fn save_worker_start(c: &Context, r: &mut Value, t: &mut Value) -> Result<Value> {
+    core::confirm_worker_start(r);
+    if r["status"] == "launching" {
+        r["status"] = json!("running");
+        t["status"] = json!("running");
+    }
+    c.update(r, t)?;
+    Ok(json!({"run":r["id"],"status":r["status"]}))
+}
+
 pub fn launch(c: &Context, id: &str) -> Result<Value> {
     let result = launch_inner(c, id);
     if let Err(error) = &result {
@@ -957,6 +979,10 @@ pub fn launch(c: &Context, id: &str) -> Result<Value> {
             && r["worker_pid"].as_u64() == Some(std::process::id() as u64)
             && external::identity_matches(std::process::id() as i64, &r["worker_identity"])
         {
+            // The worker can report work after launch_inner saves the startup error.
+            if r["startup_error"].is_string() && r["worker_start_confirmed"] == true {
+                return save_worker_start(c, &mut r, &mut t);
+            }
             r["status"] = json!("launch_failed");
             r["error"] = json!(error.to_string());
             t["status"] = json!("blocked");
@@ -1399,9 +1425,13 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
         t = c.task(s(&r, "task"))?;
         let mut fresh = c.current(&t, id)?;
         fresh["startup_error"] = json!(error.to_string());
-        let reported = ["running", "blocked", "review"].contains(&s(&fresh, "status"))
+        let reported = fresh["worker_start_confirmed"] == true
+            || ["running", "blocked", "review"].contains(&s(&fresh, "status"))
             || !s(&fresh, "progress").is_empty();
-        if state != "confirmed" && !reported {
+        if state != "confirmed" {
+            if reported {
+                return save_worker_start(c, &mut fresh, &mut t);
+            }
             if state == "absent" {
                 c.update(&mut fresh, &mut t)?;
                 return Err(error);
@@ -1421,11 +1451,7 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
         if !r["agent_session"].is_null() {
             fresh["agent_session"] = r["agent_session"].clone();
         }
-        fresh["agent_start_completed"] = json!(true);
-        fresh
-            .as_object_mut()
-            .unwrap()
-            .remove("startup_confirmation_pending");
+        confirm_agent_start(&mut fresh);
         if fresh["status"] == "launching" {
             fresh["status"] = json!("running");
         }

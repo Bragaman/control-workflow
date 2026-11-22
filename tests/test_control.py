@@ -2056,6 +2056,7 @@ class ControlTests(unittest.TestCase):
             self.assertEqual(self.cli('open', 'task1')[0]['action'], 'preparing')
             del changed['launcher_lease']
             path.write_text(json.dumps(changed))
+            self.cli('progress', '--run', opened['run'], '--text', 'Работа начата')
             unknown = self.cli('run', opened['run'], '--compact')
             self.assertIsNone(unknown['launcher_alive'])
             self.assertEqual(unknown['launcher_status'], 'unknown')
@@ -2349,6 +2350,56 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 3)
         self.assertFalse(any(c[:2] == ["agent", "prompt"] for c in self.calls()))
 
+    def test_late_worker_signals_confirm_uncertain_start(self):
+        for action, expected in (("progress", "running"), ("block", "blocked"), ("finish", "review")):
+            with self.subTest(action=action):
+                self.create(action, "--agent-review-policy", "manual")
+                self.env.update(FAKE_FAIL="1", FAKE_LIVE="1")
+                key = self.cli("open", action)[0]["run"]
+                before = self.wait_launcher(key)
+                self.assertEqual(before["status"], "launching")
+                self.assertTrue(before["startup_confirmation_pending"])
+                compact = self.cli("run", key, "--compact")
+                self.assertEqual(compact["current_startup_error"], before["startup_error"])
+                self.cli("open", action, ok=False)
+                calls_before = self.calls()
+                env = {**self.env, "FAKE_WORKER_SESSION": "unrelated-session",
+                       "FAKE_WORKER_TERMINAL": "unrelated-terminal"}
+                if action == "progress":
+                    args = ("--text", "Работа начата")
+                    env["FAKE_UNAVAILABLE"] = "1"
+                elif action == "block":
+                    args = ("--question", "Как продолжать?", "--checkpoint", "Контекст сохранён")
+                    env.pop("FAKE_LIVE")
+                    env["FAKE_OMIT_AGENT"] = "1"
+                else:
+                    report = self.root / "report.md"
+                    report.write_text("Проверенный результат")
+                    args = ("--report", str(report))
+                self.cli(action, "--run", key, *args, env=env)
+                run = self.cli("run", key)
+                compact = self.cli("run", key, "--compact")
+                self.assertEqual(run["status"], expected)
+                self.assertEqual(self.cli("show", "tasks", action)["status"], expected)
+                self.assertIsNone(run.get("startup_confirmation_pending"))
+                self.assertEqual(compact["startup_error_kind"], "historical")
+                self.assertEqual(compact["historical_startup_error"], before["startup_error"])
+                self.assertIsNone(compact["current_startup_error"])
+                for field in ("workspace", "tab", "pane", "terminal_id", "herdr_session", "agent_session"):
+                    self.assertEqual(run.get(field), before.get(field), field)
+                self.assertFalse(any(c[:2] in (["agent", "get"], ["agent", "start"], ["agent", "prompt"])
+                                     for c in self.calls()[len(calls_before):]))
+                if action == "progress":
+                    self.cli(action, "--run", key, *args, env=env)
+                    shell = {**self.env, "FAKE_OMIT_AGENT": "1"}
+                    shell.pop("FAKE_LIVE")
+                    self.cli("open", action, ok=False, env=shell)
+                    self.cli("interrupt", action, "--reason", "Работа приостановлена")
+                    compact = self.cli("run", key, "--compact")
+                    self.assertEqual(compact["historical_startup_error"], before["startup_error"])
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 3)
+        self.assertFalse(any(c[:2] == ["agent", "prompt"] for c in self.calls()))
+
     def test_launcher_preserves_worker_transitions_on_success_and_failure(self):
         for failed in (False, True):
             for action, expected in (("progress", "running"), ("block", "blocked"), ("finish", "review")):
@@ -2366,6 +2417,17 @@ class ControlTests(unittest.TestCase):
                         time.sleep(0.01)
                     if action == "progress":
                         self.cli(action, "--run", opened["run"], "--text", "Работа начата")
+                        try:
+                            during = self.cli("run", opened["run"])
+                            self.assertEqual(during["launcher_status"], "alive")
+                            self.assertEqual(during["status"], "launching")
+                            refused = self.cli("complete", key, "--status", "cancelled", ok=False)
+                            self.assertIn("Подготовитель ещё работает", refused["error"])
+                            refused = self.cli("interrupt", key, "--reason", "Отложить", ok=False)
+                            self.assertIn("Подготовитель ещё работает", refused["error"])
+                            self.assertFalse(any(c[:2] == ["tab", "close"] for c in self.calls()))
+                        finally:
+                            gate.touch()
                     elif action == "block":
                         self.cli(action, "--run", opened["run"], "--question", "Как продолжать?",
                                  "--checkpoint", "Контекст сохранён")
@@ -2377,7 +2439,11 @@ class ControlTests(unittest.TestCase):
                     run = self.wait_launcher(opened["run"])
                     self.assertEqual(run["status"], expected)
                     self.assertEqual(self.cli("show", "tasks", key)["status"], expected)
-                    self.assertTrue(run["agent_start_completed"])
+                    self.assertEqual(run.get("agent_start_completed") is True, not failed)
+                    self.assertNotIn("startup_confirmation_pending", run)
+                    if failed:
+                        compact = self.cli("run", opened["run"], "--compact")
+                        self.assertIn("agent_not_ready", compact["historical_startup_error"])
                     if action == "progress":
                         self.assertEqual(run["progress"], "Работа начата")
                     elif action == "block":
@@ -2386,6 +2452,98 @@ class ControlTests(unittest.TestCase):
                     else:
                         self.assertEqual((self.root / "runs" / run["id"] / "result.md").read_text(), "Проверенный результат")
         self.assertFalse(any("Не удалось запустить" in n["title"] for n in self.cli("notifications")))
+
+    def test_open_records_herdr_confirmation_after_late_progress(self):
+        self.create()
+        self.env.update(FAKE_FAIL="1", FAKE_LIVE="1")
+        key = self.cli("open", "task1")[0]["run"]
+        before = self.wait_launcher(key)
+        self.assertTrue(before["startup_confirmation_pending"])
+        self.cli("progress", "--run", key, "--text", "Работа начата")
+
+        shell_env = {**self.env, "FAKE_OMIT_AGENT": "1"}
+        shell_env.pop("FAKE_FAIL")
+        shell_env.pop("FAKE_LIVE")
+        refused = self.cli("open", "task1", ok=False, env=shell_env)[0]
+        self.assertIn("Результат agent start неизвестен", refused["error"])
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 1)
+
+        verified_env = {**self.env, "FAKE_AUTO_ASSIGNMENT": "1"}
+        verified = self.cli("open", "task1", env=verified_env)[0]
+        self.assertEqual(verified["run"], key)
+        self.assertEqual(verified["action"], "existing")
+        run = self.cli("run", key)
+        self.assertEqual(run["progress"], "Работа начата")
+        self.assertEqual(run["historical_startup_error"], before["startup_error"])
+        for field in ("terminal_id", "herdr_session", "agent_session"):
+            self.assertEqual(run.get(field), before.get(field), field)
+
+        reopened = self.cli("open", "task1", env=shell_env)[0]
+        self.assertNotEqual(reopened["run"], key)
+        fresh = self.wait_launcher(reopened["run"])
+        self.assertEqual(fresh["previous_run"], key)
+        self.assertEqual(fresh["status"], "running")
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 2)
+        self.assertFalse(any(c[:2] == ["agent", "prompt"] for c in self.calls()))
+
+    def test_progress_confirms_start_after_result_or_launcher_exit(self):
+        import fcntl
+
+        for kind in ("pending", "exited"):
+            with self.subTest(kind=kind):
+                self.create(kind)
+                self.env.update(FAKE_FAIL="1", FAKE_LIVE="1")
+                key = self.cli("open", kind)[0]["run"]
+                before = self.wait_launcher(key)
+                self.assertTrue(before["startup_confirmation_pending"])
+                with Path(before["launcher_lease"]).open("r+") as lease:
+                    if kind == "pending":
+                        # The RPC result is on disk; the launcher still holds its lease.
+                        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        self.assertTrue(self.cli("run", key)["launcher_alive"])
+                    else:
+                        # Intent and error were saved, but the launcher left no pending flag.
+                        state_file = self.root / "runs" / key / "state.json"
+                        state = json.loads(state_file.read_text())
+                        del state["startup_confirmation_pending"]
+                        state_file.write_text(json.dumps(state))
+                    self.cli("progress", "--run", key, "--text", "Работа начата")
+                after = self.cli("run", key)
+                self.assertEqual(after["status"], "running")
+                self.assertEqual(self.cli("show", "tasks", kind)["status"], "running")
+                self.assertIsNone(after.get("startup_confirmation_pending"))
+                self.assertEqual(after["historical_startup_error"], before["startup_error"])
+        self.assertEqual(sum(c[:2] == ["agent", "start"] for c in self.calls()), 2)
+        self.assertFalse(any(c[:2] == ["agent", "prompt"] for c in self.calls()))
+
+    def test_existing_startup_errors_are_classified_without_rewriting_state(self):
+        self.create("task1", "--agent-review-policy", "manual")
+        self.env.update(FAKE_FAIL="1", FAKE_LIVE="1")
+        key = self.cli("open", "task1")[0]["run"]
+        self.wait_launcher(key)
+        state_file = self.root / "runs" / key / "state.json"
+        state = json.loads(state_file.read_text())
+        startup_error = state["startup_error"]
+        state["agent_session"] = {"kind": "id", "value": "existing-session"}
+        for status, kind in (("launching", "current"), ("launch_failed", "current"),
+                             ("blocked", "historical"), ("review", "historical")):
+            with self.subTest(status=status):
+                state["status"] = status
+                saved = json.dumps(state)
+                state_file.write_text(saved)
+                compact = self.cli("run", key, "--compact")
+                self.assertEqual(compact["startup_error_kind"], kind)
+                self.assertEqual(compact[kind + "_startup_error"], startup_error)
+                self.assertEqual(state_file.read_text(), saved)
+        state.update(status="launch_failed", error="Legacy failure summary")
+        state_file.write_text(json.dumps(state))
+        report = self.root / "report.md"
+        report.write_text("Проверенный результат")
+        self.cli("finish", "--run", key, "--report", str(report))
+        run = self.cli("run", key)
+        self.assertEqual(run["historical_startup_error"], startup_error)
+        self.assertEqual(run["agent_session"], state["agent_session"])
+        self.assertIsNone(run.get("startup_confirmation_pending"))
 
     def test_plan_opens_beside_explicit_pane_without_starting_agent(self):
         self.create()

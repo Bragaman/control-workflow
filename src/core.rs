@@ -11,7 +11,8 @@ use std::{fs, io::Write, path::Path};
 // Shared, observational context; null means that the run did not record it.
 pub fn run_context(r: &Value) -> Value {
     let confirmed = r["agent_start_completed"] == true
-        || ["running", "review", "done"].contains(&s(r, "status"));
+        || r["worker_start_confirmed"] == true
+        || ["running", "blocked", "review", "done"].contains(&s(r, "status"));
     json!({
         "machine": r["herdr_namespace"]["machine"],
         "herdr_session": r["herdr_session"],
@@ -783,6 +784,16 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
         _ => bail!("Неизвестная команда: {name}"),
     }
 }
+pub(crate) fn confirm_worker_start(r: &mut Value) {
+    // A worker signal confirms work, without validating the Herdr terminal.
+    r.as_object_mut()
+        .unwrap()
+        .remove("startup_confirmation_pending");
+    if r["agent_start_completed"] != true {
+        r["worker_start_confirmed"] = json!(true);
+    }
+}
+
 fn worker(c: &Context, name: &str, a: &Value) -> Result<Value> {
     let run = s(a, "run");
     let mut r = c.read(&c.run_file(run)?)?;
@@ -856,6 +867,20 @@ fn worker(c: &Context, name: &str, a: &Value) -> Result<Value> {
                 .open(dir.join("progress.md"))?;
             writeln!(f, "\n- {}: {}", now(), s(a, "text"))?;
             r["progress"] = a["text"].clone();
+            if r["status"] == "running"
+                || r["agent_start_intent"] == true
+                || r["startup_confirmation_pending"] == true
+            {
+                // Until the start command returns, keep the launcher guards active.
+                if r["status"] == "launching"
+                    && (r["startup_confirmation_pending"] == true
+                        || !external::launcher_may_be_alive(&r))
+                {
+                    r["status"] = json!("running");
+                    t["status"] = json!("running");
+                }
+                confirm_worker_start(&mut r);
+            }
             c.update(&mut r, &mut t)?;
             Ok(json!({"run":run,"progress":a["text"]}))
         }
@@ -866,6 +891,7 @@ fn worker(c: &Context, name: &str, a: &Value) -> Result<Value> {
             r["checkpoint"] = json!(checkpoint);
             r["status"] = json!("blocked");
             t["status"] = json!("blocked");
+            confirm_worker_start(&mut r);
             c.update(&mut r, &mut t)?;
             let event = notification(
                 c,
@@ -908,11 +934,13 @@ fn worker(c: &Context, name: &str, a: &Value) -> Result<Value> {
             }
             if r["status"] == "launch_failed"
                 && let Some(error) = r.as_object_mut().unwrap().remove("error")
+                && r["startup_error"].is_null()
             {
                 r["startup_error"] = error;
             }
             r["status"] = json!("review");
             t["status"] = json!("review");
+            confirm_worker_start(&mut r);
             r["result_revision"] = json!(r["result_revision"].as_u64().unwrap_or(0) + 1);
             if !a["artifact"].is_null() {
                 r["review_artifacts"] = json!(
