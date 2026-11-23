@@ -5,6 +5,7 @@ pub mod config;
 pub mod core;
 pub mod external;
 pub mod git;
+pub mod hc;
 pub mod lifecycle;
 pub mod mcp;
 pub mod policy;

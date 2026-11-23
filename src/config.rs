@@ -192,7 +192,7 @@ impl Context {
             "Неподдержанная schema_version; требуется 1"
         );
         ensure!(
-            ["herdr-codex", "herdr-claude"].contains(&s(&settings, "adapter")),
+            ["herdr-codex", "herdr-claude", crate::hc::ADAPTER].contains(&s(&settings, "adapter")),
             "Неизвестный adapter"
         );
         ensure!(

@@ -113,8 +113,7 @@ pub fn handle(c: &Context, name: &str, a: &Value) -> Result<Value> {
                 template["depends"].as_array().is_none_or(|x| x.is_empty()),
                 "Шаблон с зависимостями не поддерживается"
             );
-            c.require_herdr()?;
-            let namespace = c.namespace(None)?;
+            let namespace = c.new_namespace()?;
             let project = c.read(&c.path("projects", s(&template, "project"))?)?;
             let mut snapshot = json!({});
             for k in [
@@ -177,8 +176,7 @@ pub fn handle(c: &Context, name: &str, a: &Value) -> Result<Value> {
     }
 }
 fn tick(c: &Context, now: DateTime<Utc>) -> Result<Value> {
-    c.require_herdr()?;
-    let namespace = c.namespace(None)?;
+    let namespace = c.new_namespace()?;
     let mut output = Vec::new();
     for mut v in records(c)? {
         if v["status"] != "active" {

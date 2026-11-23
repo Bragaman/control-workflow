@@ -29,9 +29,9 @@ ALLOWLIST = ({'README.md', 'CHANGELOG.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', 
 NATIVE_FILES = {'build.rs', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
                 '.github/workflows/rust.yml', 'docs/rust.md', 'tests/native.rs',
                 'tests/test_native.py', 'tests/test_mcp.py', 'tests/test_interop.py',
-                'tests/test_model_policy.py', 'tests/test_build_version.py', 'tests/mcp_client.py'} | {
+                'tests/test_model_policy.py', 'tests/test_hc.py', 'tests/test_build_version.py', 'tests/mcp_client.py'} | {
     'src/' + name for name in ('args.rs', 'casefold.rs', 'commands.json', 'config.rs', 'core.rs',
-                               'external.rs', 'git.rs', 'lib.rs', 'lifecycle.rs',
+                               'external.rs', 'git.rs', 'hc.rs', 'lib.rs', 'lifecycle.rs',
                                'main.rs', 'mcp.rs', 'policy.rs', 'resources.rs', 'review.rs', 'schedule.rs', 'shipping.rs', 'store.rs')}
 PUBLIC_DOCS = {'docs/guide/' + name for name in (
     'installation.md', 'first-task.md', 'workflow.md', 'settings.md', 'reference.md',

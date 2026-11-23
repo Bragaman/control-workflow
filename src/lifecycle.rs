@@ -3,7 +3,7 @@ use crate::{
     config::{Context, location},
     core::{self, extend},
     external::{self, error_code, launcher_may_be_alive},
-    git,
+    git, hc,
     store::{self, key, now},
 };
 use anyhow::{Result, anyhow, bail, ensure};
@@ -123,7 +123,10 @@ fn current_pane(c: &Context, r: &Value) -> Result<Option<Value>> {
 }
 // A requested ID or a terminal title is not evidence of an actual thread.
 fn capture_session(c: &Context, r: &mut Value) {
-    if external::agent_kind(c, r) != "codex" || r["terminal_id"].as_str().is_none() {
+    if hc::enabled(r)
+        || external::agent_kind(c, r) != "codex"
+        || r["terminal_id"].as_str().is_none()
+    {
         return;
     }
     let name = format!("cp-{}", s(r, "id").trim_start_matches("run-"));
@@ -251,6 +254,10 @@ pub fn require_absent(c: &Context, r: &Value) -> Result<()> {
         "Неизвестен результат создания Git worktree: {}; сначала сверьте Git и состояние запуска",
         s(r, "id")
     );
+    if hc::enabled(r) {
+        ensure!(hc::terminal(c, r)?.is_none(), "Терминал hc ещё работает");
+        return Ok(());
+    }
     if r["pane"].is_null() {
         return Ok(());
     }
@@ -277,6 +284,10 @@ pub fn recover_layout(c: &Context, r: &mut Value, t: &mut Value, a: &Value) -> R
         ["launch_failed", "launching", "interrupted"].contains(&s(r, "status"))
             && r["agent_start_intent"].is_null(),
         "Восстановление доступно до старта агента"
+    );
+    ensure!(
+        !hc::enabled(r),
+        "Для hc используйте open для сверки запуска"
     );
     c.check_namespace(r)?;
     let ns = c.namespace(None)?;
@@ -419,6 +430,16 @@ fn old_workspace_idle(c: &Context, p: &Value, ns: &Value, current: Option<&str>)
 }
 pub fn agent_state(c: &Context, r: &Value) -> Result<&'static str> {
     c.check_namespace(r)?;
+    if hc::enabled(r) {
+        let Some(v) = hc::terminal(c, r)? else {
+            return Ok("absent");
+        };
+        return Ok(if v["argv"] == r["launch_argv"] {
+            "confirmed"
+        } else {
+            "unconfirmed"
+        });
+    }
     let Some(pane) = current_pane(c, r)? else {
         return Ok("absent");
     };
@@ -461,6 +482,10 @@ fn confirm_agent_start(r: &mut Value) {
         .remove("startup_confirmation_pending");
 }
 pub fn mark_recovered(c: &Context, r: &mut Value, t: &mut Value) -> Result<()> {
+    if hc::enabled(r) {
+        let v = hc::terminal(c, r)?.ok_or_else(|| anyhow!("Терминал hc отсутствует"))?;
+        hc::confirm(r, &v)?;
+    }
     capture_session(c, r);
     confirm_agent_start(r);
     if let Some(error) = r.as_object_mut().unwrap().remove("error") {
@@ -504,7 +529,7 @@ fn start_task(
         );
     }
     let mut p = c.read(&c.path("projects", s(&t, "project"))?)?;
-    let ns = c.namespace(None)?;
+    let ns = c.new_namespace()?;
     let mut previous = if let Some(id) = t["active_run"].as_str().map(str::to_owned) {
         let mut r = c.read(&c.run_file(&id)?)?;
         // Old launchers journalled a parent creation before even reading the
@@ -646,23 +671,25 @@ fn start_task(
     } else {
         None
     };
-    if t["code"] == true {
-        ensure!(
-            p["layout_pending"].is_null(),
-            "Неизвестен результат создания layout; сначала сверьте запуск {}",
-            s(&p, "layout_pending")
-        );
-    } else {
-        let workspace = workspace_binding(c, &mut p, &ns, repair)?;
-        if !p["workspace"].is_null() && workspace.is_none() {
-            old_workspace_idle(c, &p, &ns, None)?;
+    if !hc::enabled(&c.settings) {
+        if t["code"] == true {
+            ensure!(
+                p["layout_pending"].is_null(),
+                "Неизвестен результат создания layout; сначала сверьте запуск {}",
+                s(&p, "layout_pending")
+            );
+        } else {
+            let workspace = workspace_binding(c, &mut p, &ns, repair)?;
+            if !p["workspace"].is_null() && workspace.is_none() {
+                old_workspace_idle(c, &p, &ns, None)?;
+            }
         }
-    }
-    // session list discovers socket paths without proving socket access. Probe
-    // only after validating bindings, before claiming a run or detaching.
-    c.herdr(&["workspace", "list"], ns["session"].as_str())
+        // session list discovers socket paths without proving socket access. Probe
+        // only after validating bindings, before claiming a run or detaching.
+        c.herdr(&["workspace", "list"], ns["session"].as_str())
         .map_err(|e| anyhow!("Нет доступа к herdr socket: {e}. При запрете песочницы повторите ту же команду вне неё; задача не запущена"))?;
-    c.save(&c.path("projects", s(&p, "id"))?, &p)?;
+        c.save(&c.path("projects", s(&p, "id"))?, &p)?;
+    }
     let repos = if t["repositories"].is_null() {
         &p["repositories"]
     } else {
@@ -795,6 +822,14 @@ fn summary(c: &Context, t: &Value, r: Option<&Value>, action: &str) -> Result<Va
     let mut v = json!({"task":t["id"],"title":t["title"],"status":t["status"],"goal":t["goal"],"action":action});
     let dir = if let Some(r) = r {
         extend(&mut v, core::run_context(r));
+        if hc::enabled(r) {
+            v["adapter"] = r["adapter"].clone();
+            v["hc"] = if matches!(action, "result" | "awaiting_answer") {
+                hc::inspect(c, r)
+            } else {
+                hc::client(c, r, None)
+            };
+        }
         if action == "result" {
             v["result_summary"] = core::compact_summary(c, r)?;
         }
@@ -863,12 +898,14 @@ fn open_one(c: &Context, id: &str, requested: Option<&str>) -> Result<Value> {
     }
     if let Some(mut r) = r {
         reconcile_launcher(c, &mut r)?;
-        let ns = c.namespace(None)?;
-        ensure!(
-            (!r["herdr_namespace"].is_null() && r["herdr_namespace"] == ns)
-                || (r["herdr_namespace"].is_null() && r["herdr_session"] == ns["session"]),
-            "Запуск принадлежит другому или неподтверждённому namespace"
-        );
+        if !hc::enabled(&r) {
+            let ns = c.namespace(None)?;
+            ensure!(
+                (!r["herdr_namespace"].is_null() && r["herdr_namespace"] == ns)
+                    || (r["herdr_namespace"].is_null() && r["herdr_session"] == ns["session"]),
+                "Запуск принадлежит другому или неподтверждённому namespace"
+            );
+        }
         if launcher_may_be_alive(&r) {
             ensure!(
                 external::launcher_state(&r) != external::ProcessState::Unknown,
@@ -878,7 +915,29 @@ fn open_one(c: &Context, id: &str, requested: Option<&str>) -> Result<Value> {
             crate::policy::check_reuse(selected.as_ref(), &r)?;
             return summary(c, &t, Some(&r), "preparing");
         }
-        if !r["pane"].is_null() {
+        if hc::enabled(&r) {
+            if let Some(v) = hc::terminal(c, &r)? {
+                let needs_identity = r["pane"].is_null() || r["hc_created_ms"].is_null();
+                hc::confirm(&mut r, &v)?;
+                crate::policy::check_reuse(selected.as_ref(), &r)?;
+                let mut t = t.clone();
+                let action =
+                    if ["launch_failed", "interrupted", "launching"].contains(&s(&r, "status")) {
+                        crate::review::guard_restart(c, &t)?;
+                        mark_recovered(c, &mut r, &mut t)?;
+                        "recovered"
+                    } else {
+                        if needs_identity {
+                            confirm_agent_start(&mut r);
+                            c.update(&mut r, &mut t)?;
+                        }
+                        "existing"
+                    };
+                let mut result = summary(c, &t, Some(&r), action)?;
+                result["hc"] = hc::client(c, &r, Some(&v));
+                return Ok(result);
+            }
+        } else if !r["pane"].is_null() {
             c.check_namespace(&r)?;
             if let Some(pane) = current_pane(c, &r)?
                 && !pane["agent"].is_null()
@@ -924,7 +983,6 @@ fn open_one(c: &Context, id: &str, requested: Option<&str>) -> Result<Value> {
     summary(c, &t, Some(&r), "preparing")
 }
 pub fn open(c: &Context, a: &Value) -> Result<Value> {
-    c.require_herdr()?;
     let mut results = vec![];
     let mut seen = std::collections::HashSet::new();
     for id in strings(&a["ids"]) {
@@ -1097,6 +1155,9 @@ fn launch_inner(c: &Context, id: &str) -> Result<Value> {
         )?
     };
     ensure!(cwd.is_dir(), "Не найден рабочий каталог: {}", cwd.display());
+    if hc::enabled(&r) {
+        return hc::launch(c, id, &cwd, &mut t, &mut r);
+    }
     let layout;
     {
         let _lock = c.lock()?;
@@ -1553,18 +1614,6 @@ pub fn assignment_text(c: &Context, r: &Value, t: &Value) -> Result<String> {
 }
 pub fn plan(c: &Context, a: &Value) -> Result<Value> {
     let t = c.task(s(a, "id"))?;
-    let target = a["pane"]
-        .as_str()
-        .map(str::to_owned)
-        .or_else(|| {
-            std::env::var("HERDR_PANE_ID")
-                .ok()
-                .filter(|v| !v.is_empty())
-        })
-        .ok_or_else(|| {
-            anyhow!("Для просмотра вне herdr укажите --herdr-session NAME и --pane ID нужного таба")
-        })?;
-    c.herdr(&["pane", "get", &target], None)?;
     let dir = if let Some(run) = t["active_run"].as_str() {
         c.run_file(run)?.parent().unwrap().to_path_buf()
     } else {
@@ -1600,6 +1649,25 @@ pub fn plan(c: &Context, a: &Value) -> Result<Value> {
         store::atomic(&f, content.as_bytes())?;
         f
     };
+    let record = t["active_run"]
+        .as_str()
+        .map(|run| c.read(&c.run_file(run)?))
+        .transpose()?;
+    if hc::enabled(record.as_ref().unwrap_or(&c.settings)) && a["pane"].is_null() {
+        return Ok(json!({"task":t["id"],"file":file,"text":fs::read_to_string(&file)?}));
+    }
+    let target = a["pane"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| {
+            std::env::var("HERDR_PANE_ID")
+                .ok()
+                .filter(|v| !v.is_empty())
+        })
+        .ok_or_else(|| {
+            anyhow!("Для просмотра вне herdr укажите --herdr-session NAME и --pane ID нужного таба")
+        })?;
+    c.herdr(&["pane", "get", &target], None)?;
     let pager = crate::shipping::which("less")
         .or_else(|| crate::shipping::which("more"))
         .ok_or_else(|| anyhow!("Для просмотра установите less или more"))?;
@@ -1928,7 +1996,12 @@ fn queue_completion(c: &Context, a: &Value, r: &Value) -> Result<Value> {
         .arg(s(r, "id"))
         .arg(&token)
         .current_dir(&c.root);
-    for k in ["HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"] {
+    for k in [
+        "HERDR_PANE_ID",
+        "HERDR_TAB_ID",
+        "HERDR_WORKSPACE_ID",
+        "HC_TERMINAL_ID",
+    ] {
         cmd.env_remove(k);
     }
     match external::detach(&mut cmd, &file.with_extension("log")) {
@@ -2054,6 +2127,7 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
         );
     }
     if let Some(r) = &r
+        && !hc::enabled(r)
         && let (Some(saved), Some(selected)) = (r["herdr_session"].as_str(), c.session.as_deref())
     {
         ensure!(
@@ -2088,7 +2162,10 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
             r["status"] != "launching" || !launcher_may_be_alive(r),
             "Подготовитель ещё работает; завершение повторите после подготовки запуска"
         );
-        if let (Some(saved), Some(selected)) = (r["herdr_session"].as_str(), c.session.as_deref()) {
+        if !hc::enabled(r)
+            && let (Some(saved), Some(selected)) =
+                (r["herdr_session"].as_str(), c.session.as_deref())
+        {
             ensure!(
                 saved == selected,
                 "Используйте сохранённую сессию запуска: {saved}"
@@ -2107,7 +2184,18 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
                 s(&other, "id")
             );
         }
-        if !r["tab"].is_null() {
+        if hc::enabled(r) {
+            ensure!(
+                !launcher_may_be_alive(r),
+                "Подготовитель hc ещё выполняется"
+            );
+            let live = hc::closing_terminal(c, r)?;
+            if live.as_ref().is_some_and(|v| {
+                v["address"].as_str() == std::env::var("HC_TERMINAL_ID").ok().as_deref()
+            }) {
+                return queue_completion(c, a, r);
+            }
+        } else if !r["tab"].is_null() {
             tab = saved_tab(c, r)?;
             if let Some(tab) = &tab {
                 if !r["repository_workspace"].is_null() {
@@ -2225,6 +2313,9 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
     r["cleanup"] = json!({"tab":r["tab"],"pane":r["pane"],"terminal_id":terminal_id,"workspace":r["workspace"],"at":now(),"status":"pending"});
     c.update(r, &mut t)?;
     let cleanup = (|| {
+        if hc::enabled(r) {
+            return hc::close(c, r);
+        }
         let workspace_status = cleanup_workspace(c, r)?;
         r["cleanup"]["workspace_status"] = json!(workspace_status);
         if workspace_status != "closed" && tab.is_some() {
@@ -2265,7 +2356,9 @@ pub fn publish(c: &Context, a: &Value) -> Result<Value> {
     );
     let mut r = c.current(&t, s(&t, "active_run"))?;
     c.check_namespace(&r)?;
-    if !r["tab"].is_null() && saved_tab(c, &r)?.is_some() {
+    if hc::enabled(&r) {
+        hc::terminal(c, &r)?;
+    } else if !r["tab"].is_null() && saved_tab(c, &r)?.is_some() {
         let panes = c.herdr(
             &["pane", "list", "--workspace", s(&r, "workspace")],
             r["herdr_session"].as_str(),

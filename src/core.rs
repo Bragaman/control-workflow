@@ -315,7 +315,6 @@ pub fn execute(c: &Context, name: &str, a: &Value) -> Result<Value> {
     match name {
         name if name.starts_with("schedule-") => crate::schedule::handle(c, name, a),
         "start" => {
-            c.require_herdr()?;
             let _lock = c.lock()?;
             lifecycle::start(c, s(a, "id"), false, false, a["profile"].as_str())
         }
@@ -551,6 +550,9 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
                 r["completion_process_alive"] = json!(external::request_alive(&req));
                 r["completion_request"] = req;
             }
+            if crate::hc::enabled(&r) {
+                r["hc"] = crate::hc::inspect(c, &r);
+            }
             let launcher = external::launcher_state(&r);
             r["launcher_alive"] = json!(launcher.alive());
             r["launcher_status"] = json!(launcher.as_str());
@@ -586,6 +588,8 @@ fn execute_simple(c: &Context, name: &str, a: &Value) -> Result<Value> {
                         "worktree_mutation_status",
                         "agent_session",
                         "capabilities",
+                        "hc",
+                        "adapter",
                         "launcher_diagnostic",
                         "seconds_since_update",
                         "completion_process_alive",
@@ -1004,6 +1008,11 @@ pub fn accept(c: &Context, t: &mut Value, r: &mut Value, by: &str, note: &str) -
 }
 pub fn notification(c: &Context, title: &str, body: &str, r: Option<&Value>) -> Result<Value> {
     let mut n = json!({"title":title,"body":body,"created_at":now(),"delivered":false,"run":r.map(|v|&v["id"])});
+    if r.is_some_and(crate::hc::enabled) {
+        n["channel"] = json!("workflow");
+        c.save(&c.path("notifications", &key("notice-"))?, &n)?;
+        return Ok(n);
+    }
     let send = (|| {
         if let Some(r) = r {
             c.check_namespace(r)?;

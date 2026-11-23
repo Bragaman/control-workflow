@@ -10,7 +10,9 @@
 --bindings-root /path/bindings. Они приоритетнее CONTROL_PLANE_STATE,
 CONTROL_PLANE_CONFIG, CONTROL_PLANE_BINDINGS; CONTROL_PLANE_ROOT — прежнее имя state.
 
-Для команд herdr вне его окружения укажи --herdr-session NAME, проверив имя
+Для hc-codex выбирай hc_session в runtime.json. Подключение из Desktop, TUI и API описано в [runtime-layout.md](runtime-layout.md#один-терминал-hc-в-трёх-клиентах).
+
+Для команд TUI herdr вне его окружения укажи --herdr-session NAME, проверив имя
 через `herdr session list`. При запрете сокета повтори ту же команду с разрешением
 вне песочницы. Не подставляй HERDR_ENV и не выбирай чужой текущий workspace.
 

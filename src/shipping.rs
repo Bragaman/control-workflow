@@ -40,7 +40,11 @@ pub fn doctor(c: &Context) -> Result<Value> {
     }
     for name in [
         "git",
-        c.machine["herdr_executable"].as_str().unwrap_or("herdr"),
+        if crate::hc::enabled(&c.settings) {
+            crate::hc::executable(c)
+        } else {
+            c.machine["herdr_executable"].as_str().unwrap_or("herdr")
+        },
         if c.settings["adapter"] == "herdr-claude" {
             "claude"
         } else {
@@ -56,7 +60,9 @@ pub fn doctor(c: &Context) -> Result<Value> {
         }
         v[name] = info;
     }
-    if let Some(session) = &c.session {
+    if !crate::hc::enabled(&c.settings)
+        && let Some(session) = &c.session
+    {
         v["herdr_server"] = json!({"session":session,"reachable":c.herdr_text(&["status","server"],Some(session),Duration::from_secs(10)).is_ok()});
     }
     Ok(v)

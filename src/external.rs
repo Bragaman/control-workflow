@@ -445,7 +445,21 @@ impl Context {
             json!({"session":item["name"],"socket":location(s(item,"socket_path"))?,"machine":machine_id()?,"uid":unsafe{libc::getuid()}}),
         )
     }
+    pub fn new_namespace(&self) -> Result<Value> {
+        if crate::hc::enabled(&self.settings) {
+            crate::hc::namespace(
+                self,
+                self.machine["hc_session"].as_str().unwrap_or("default"),
+            )
+        } else {
+            self.require_herdr()?;
+            self.namespace(None)
+        }
+    }
     pub fn check_namespace(&self, r: &Value) -> Result<()> {
+        if crate::hc::enabled(r) {
+            return crate::hc::check(self, r);
+        }
         if let Some(ns) = r.get("herdr_namespace").filter(|v| !v.is_null()) {
             ensure!(
                 self.namespace(ns["session"].as_str())? == *ns,
@@ -456,7 +470,9 @@ impl Context {
     }
 }
 pub fn capabilities(adapter: &str) -> Value {
-    if adapter == "herdr-claude" {
+    if adapter == crate::hc::ADAPTER {
+        json!({"interactive_start":true,"assignment_confirmation":true,"resume_by_id":false,"session_id_capture":false,"turn_events":true,"platforms_tested":["linux"]})
+    } else if adapter == "herdr-claude" {
         json!({"interactive_start":true,"assignment_confirmation":true,"resume_by_id":false,"session_id_capture":false,"turn_events":false,"platforms_tested":[],"experimental":true})
     } else {
         json!({"interactive_start":true,"assignment_confirmation":true,"resume_by_id":false,"session_id_capture":true,"turn_events":false,"platforms_tested":["linux"]})
@@ -489,7 +505,18 @@ pub fn start_args(
         c.settings["agent_start_timeout_ms"].to_string(),
         "--".into(),
     ];
-    if kind == "claude" {
+    a.extend(agent_args(c, r, t, cwd, assignment));
+    a
+}
+pub fn agent_args(
+    c: &Context,
+    r: &mut Value,
+    t: &Value,
+    cwd: &Path,
+    assignment: &Path,
+) -> Vec<String> {
+    let mut a = Vec::new();
+    if agent_kind(c, r) == "claude" {
         if r["requested_agent_session_id"].is_null() {
             r["requested_agent_session_id"] = json!(uuid::Uuid::new_v4().to_string());
         }

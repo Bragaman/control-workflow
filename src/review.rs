@@ -891,6 +891,10 @@ pub fn handle(c: &Context, name: &str, args: &Value) -> Result<Value> {
     match name {
         "review-terminal-create" => {
             ensure!(
+                !crate::hc::enabled(&r),
+                "Для hc используйте независимый subagent"
+            );
+            ensure!(
                 a["status"] == "pending",
                 "Терминал можно создать только для ожидающего ревью"
             );

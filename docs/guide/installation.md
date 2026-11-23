@@ -1,16 +1,24 @@
 # Установка
 
-Панель, herdr и CLI агента работают на одной машине. Нужны Linux x86_64/ARM64
+Панель и CLI агента работают на одной машине. Нужны Linux x86_64/ARM64
 или macOS ARM64, авторизованный Codex или Claude Code. Для задач с кодом нужен Git.
 Готовая поставка работает без Python и Rust.
 
 ## 1. Подготовьте зависимости
 
-Установите [herdr](https://herdr.dev/docs/install/) и CLI выбранного агента:
-[Codex](https://learn.chatgpt.com/docs/codex/cli) или
+Установите CLI выбранного агента: [Codex](https://learn.chatgpt.com/docs/codex/cli) или
 [Claude Code](https://code.claude.com/docs/en/overview).
 Пройдите вход у провайдера и проверьте интерактивный запуск агента.
-Команды herdr и codex либо claude должны быть доступны в PATH.
+
+Для штатного TUI установите [herdr](https://herdr.dev/docs/install/).
+Для работы с одним исполнителем Codex через Desktop, TUI и API отдельно
+установите herdr-core на машине исполнителя. Команда `hc --version` проверяет,
+что оболочка нашла его в PATH. [Официальный установщик для Linux и macOS](https://github.com/herdrdev/herdr-core#install).
+
+```sh
+curl -fsSL https://releases.herdr.dev/core/install.sh | sh
+hc --version
+```
 
 ## 2. Установите панель
 
@@ -56,12 +64,19 @@ export CW_MANAGER="$HOME/control-workflow-manager"
 export CW_CONFIG="$HOME/.config/control-workflow/config.json"
 mkdir -p "$CW_MANAGER" "$(dirname "$CW_CONFIG")"
 cp "$CW_PROGRAM/examples/config-codex.json" "$CW_CONFIG"
+```
+
+Пример конфигурации запускает Codex в штатном TUI. Если вы установили herdr-core
+для новых запусков, выберите `hc-codex` в [настройках](settings.md) перед проверкой.
+
+```sh
 "$CW_PROGRAM/bin/control-workflow" --config "$CW_CONFIG" doctor
 "$CW_PROGRAM/bin/control-workflow" --config "$CW_CONFIG" environment
 "$CW_PROGRAM/bin/control-workflow" skills --destination "$CW_MANAGER/.agents/skills"
 ```
 
-В doctor значения `herdr.found` и `codex.found` должны быть true.
+Для Codex проверьте в выводе doctor поле `codex.found` и поле выбранного
+адаптера (`herdr.found` или `hc.found`). Оба значения должны быть true.
 
 Для задач с кодом также нужно `git.found=true`. Doctor не проверяет вход у провайдера или доступность модели. В environment видны
 выбранные пути: сохраните их для управляющего. Последняя команда подключает
@@ -72,6 +87,12 @@ cp "$CW_PROGRAM/examples/config-codex.json" "$CW_CONFIG"
 Адаптер Claude экспериментальный.
 
 ## 4. Откройте сессию
+
+Если выбрали herdr-core, запустите управляющего командой `codex` из
+`"$CW_MANAGER"`. При выборе экземпляра передайте пути из environment.
+Подключение к исполнителю описано в [настройках](settings.md).
+
+Для штатного TUI откройте сессию:
 
 ```sh
 cd "$CW_MANAGER"

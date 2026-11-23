@@ -12,7 +12,8 @@
 ## Как устроена работа
 
 Проект объединяет контекст и задачи. У каждой задачи есть цель, критерии готовности
-и один или несколько запусков с планом и результатами.
+и один или несколько запусков с планом и результатами. Через Herdr Core один диалог
+Codex можно открыть в Herdr Desktop, штатном TUI или собственном клиенте.
 
 Для изменения кода панель создаёт отдельный Git worktree. Исследования и применение
 готовых настроек можно выполнять без него. Завершённую работу агент передаёт на
@@ -23,12 +24,12 @@
 - [Установка](https://bragaman.github.io/control-workflow/docs/guide/installation/) — зависимости и подготовка экземпляра.
 - [Первая задача](https://bragaman.github.io/control-workflow/docs/guide/first-task/) — пройти цикл от постановки до приёмки.
 - [Работа с задачами](https://bragaman.github.io/control-workflow/docs/guide/workflow/) — статусы, вопросы, ревью и Git.
-- [Настройки](https://bragaman.github.io/control-workflow/docs/guide/settings/) — хранение данных, агент и модели.
+- [Настройки](https://bragaman.github.io/control-workflow/docs/guide/settings/) — хранение данных, выбор модели и подключение к исполнителю.
 - [Справка](https://bragaman.github.io/control-workflow/docs/guide/reference/) — команды и решение типичных проблем.
 
 Выпуск экспериментальный. Целевые платформы — Linux x86_64/ARM64 и macOS ARM64.
-Автотесты не подтверждают полный цикл с реальным CLI агента: для Claude Code
-такой цикл ещё не подтверждён; для Codex на Linux проверен сценарий без кода.
+На Linux проверены запуск Codex без кода и полный цикл задачи с Git worktree
+через Herdr Core. Полный цикл с реальным CLI Claude Code ещё предстоит проверить.
 Windows и macOS Intel не поддерживаются.
 
 [Сайт документации](https://bragaman.github.io/control-workflow/) ·
