@@ -4,14 +4,90 @@ use crate::{args::s, config::Context, external};
 use anyhow::{Result, anyhow, bail, ensure};
 use serde_json::{Value, json};
 use std::{
-    io::{BufRead, BufReader, Write},
+    fmt,
+    io::{self, BufRead, BufReader, Read, Write},
     os::{fd::OwnedFd, unix::net::UnixStream},
     path::Path,
     process::{Child, Command, Stdio},
+    sync::mpsc,
+    thread,
     time::Duration,
 };
 
 pub const ADAPTER: &str = "hc-codex";
+
+#[derive(Debug)]
+pub(crate) enum ConnectionUnavailable {
+    AccessDenied(String),
+    Unavailable(String),
+}
+
+impl ConnectionUnavailable {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::AccessDenied(_) => "hc_access_denied",
+            Self::Unavailable(_) => "hc_unavailable",
+        }
+    }
+}
+
+impl fmt::Display for ConnectionUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AccessDenied(message) => {
+                write!(
+                    f,
+                    "Нет доступа к локальному hc (сокет или блокировка): {message}"
+                )
+            }
+            Self::Unavailable(message) => write!(f, "Не удалось проверить локальный hc: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for ConnectionUnavailable {}
+
+const ACCESS_ERRNOS: [i32; 3] = [libc::EACCES, libc::EPERM, libc::EROFS];
+
+fn access_error(error: io::Error) -> anyhow::Error {
+    if error
+        .raw_os_error()
+        .is_some_and(|n| ACCESS_ERRNOS.contains(&n))
+    {
+        return ConnectionUnavailable::AccessDenied(error.to_string()).into();
+    }
+    error.into()
+}
+
+fn reported_error(output: &str) -> Option<anyhow::Error> {
+    let response: Value = output
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str(line).ok())?;
+    let error = &response["error"];
+    let message = error["message"].as_str()?;
+    // hc reports socket and core-lock failures as "unavailable" with a Rust
+    // OS error suffix. Other unavailable errors include restarts and timeouts.
+    if error["kind"] == "unavailable" {
+        let unavailable = if ACCESS_ERRNOS
+            .iter()
+            .any(|n| message.ends_with(&format!("(os error {n})")))
+        {
+            ConnectionUnavailable::AccessDenied(message.to_owned())
+        } else {
+            ConnectionUnavailable::Unavailable(message.to_owned())
+        };
+        return Some(unavailable.into());
+    }
+    Some(anyhow!("Не удалось связаться с hc: {message}"))
+}
+
+pub(crate) fn retry(c: &Context, operation: &str) -> String {
+    let entry = crate::lifecycle::entry_command(c);
+    format!(
+        "Повторите `{entry} {operation}` в обычной консоли на машине исполнителя под тем же пользователем с доступом к hc"
+    )
+}
 
 pub fn enabled(record: &Value) -> bool {
     record["adapter"] == ADAPTER
@@ -43,8 +119,16 @@ pub fn namespace(c: &Context, session: &str) -> Result<Value> {
         command(c, session).args(["--json", "server", "start"]),
         Duration::from_secs(30),
     )?;
-    ensure!(ok, "Не удалось открыть hc: {err}{out}");
-    identity(session, &serde_json::from_str(&out)?)
+    if !ok {
+        return Err(reported_error(&err)
+            .or_else(|| reported_error(&out))
+            .unwrap_or_else(|| anyhow!("Не удалось открыть hc: {err}{out}")));
+    }
+    let ns = identity(session, &serde_json::from_str(&out)?)?;
+    // Starting the core and reaching it over the worker's transport are
+    // separate checks. Prove access before the caller records a new run.
+    drop(Connection::connect(c, session, &ns)?);
+    Ok(ns)
 }
 
 // Bind identity checks, reads and mutations to one peer. A restarted core
@@ -62,31 +146,67 @@ impl Drop for Connection {
     }
 }
 
+fn capture_stderr(child: &mut Child) -> io::Result<mpsc::Receiver<Vec<u8>>> {
+    let mut stderr = child.stderr.take().expect("hc connect stderr is piped");
+    let (send, receive) = mpsc::sync_channel(1);
+    // Keep a bounded diagnostic prefix and drain any further output so the
+    // child can finish even with a noisy wrapper or an unusable TMPDIR.
+    thread::Builder::new().spawn(move || {
+        let mut prefix = Vec::new();
+        let _ = stderr.by_ref().take(4096).read_to_end(&mut prefix);
+        let _ = send.send(prefix);
+        let _ = io::copy(&mut stderr, &mut io::sink());
+    })?;
+    Ok(receive)
+}
+
 impl Connection {
     fn open(c: &Context, r: &Value) -> Result<Self> {
-        let session = s(r, "herdr_session");
-        let ns = &r["herdr_namespace"];
+        Self::connect(c, s(r, "herdr_session"), &r["herdr_namespace"])
+    }
+
+    fn connect(c: &Context, session: &str, ns: &Value) -> Result<Self> {
         ensure!(
             ns["machine"] == external::machine_id()?
                 && ns["session"] == session
                 && ns["uid"] == unsafe { libc::getuid() },
             "Запуск hc принадлежит другой машине или сессии"
         );
-        let (stream, peer) = UnixStream::pair()?;
-        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+        let (stream, peer) = UnixStream::pair().map_err(access_error)?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .map_err(access_error)?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(30)))
+            .map_err(access_error)?;
         let child = command(c, session)
             .args(["connect", "--session", session])
             .stdin(OwnedFd::from(peer.try_clone()?))
             .stdout(OwnedFd::from(peer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()?;
         let mut conn = Self {
             child,
             stream: BufReader::new(stream),
             serial: 0,
         };
-        let status = conn.call("server.status", json!({}))?;
+        let diagnostic = capture_stderr(&mut conn.child)?;
+        let status = match conn.call("server.status", json!({})) {
+            Ok(status) => status,
+            Err(error) => {
+                drop(conn);
+                if error.is::<ConnectionUnavailable>() {
+                    return Err(error);
+                }
+                return Err(diagnostic
+                    .recv_timeout(Duration::from_millis(150))
+                    .ok()
+                    .and_then(|bytes| reported_error(&String::from_utf8_lossy(&bytes)))
+                    .unwrap_or_else(|| {
+                        ConnectionUnavailable::Unavailable(error.to_string()).into()
+                    }));
+            }
+        };
         ensure!(
             identity(session, &status)? == *ns,
             "Изменилась идентичность core запуска"
@@ -100,10 +220,11 @@ impl Connection {
             self.stream.get_mut(),
             "{}",
             json!({"jsonrpc":"2.0","id":self.serial,"method":method,"params":params})
-        )?;
+        )
+        .map_err(access_error)?;
         let mut line = String::new();
         ensure!(
-            self.stream.read_line(&mut line)? > 0,
+            self.stream.read_line(&mut line).map_err(access_error)? > 0,
             "hc закрыл соединение во время {method}"
         );
         let v: Value = serde_json::from_str(&line)?;
@@ -291,6 +412,10 @@ pub fn inspect(c: &Context, r: &Value) -> Value {
             let mut info = client(c, r, None);
             info["error"] = json!(e.to_string());
             info["terminal_state"] = json!("unknown");
+            if let Some(unavailable) = e.downcast_ref::<ConnectionUnavailable>() {
+                info["error_code"] = json!(unavailable.code());
+                info["next_action"] = json!(retry(c, &format!("run {} --compact", s(r, "id"))));
+            }
             info
         }
     }

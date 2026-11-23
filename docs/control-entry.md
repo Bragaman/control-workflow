@@ -10,9 +10,13 @@
 --bindings-root /path/bindings. Они приоритетнее CONTROL_PLANE_STATE,
 CONTROL_PLANE_CONFIG, CONTROL_PLANE_BINDINGS; CONTROL_PLANE_ROOT — прежнее имя state.
 
-Для hc-codex выбирай hc_session в runtime.json. Подключение из Desktop, TUI и API описано в [runtime-layout.md](runtime-layout.md#один-терминал-hc-в-трёх-клиентах).
+Для `hc-codex` вызови `open ID` без `--herdr-session`. Сессию задаёт `hc_session`
+в `runtime.json`. В Desktop ищи `hc.space` и `hc.tab`, из консоли подключайся по
+`hc.attach`. При `hc_access_denied` или `hc_unavailable` используй повтор из
+`next_action` на машине исполнителя под тем же пользователем с доступом к hc. Подробности подключения
+есть в [runtime-layout.md](runtime-layout.md#один-терминал-hc-в-трёх-клиентах).
 
-Для команд TUI herdr вне его окружения укажи --herdr-session NAME, проверив имя
+Для команд legacy Herdr TUI вне его окружения укажи `--herdr-session NAME`, проверив имя
 через `herdr session list`. При запрете сокета повтори ту же команду с разрешением
 вне песочницы. Не подставляй HERDR_ENV и не выбирай чужой текущий workspace.
 

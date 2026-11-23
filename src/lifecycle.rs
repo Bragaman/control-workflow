@@ -829,6 +829,9 @@ fn summary(c: &Context, t: &Value, r: Option<&Value>, action: &str) -> Result<Va
             } else {
                 hc::client(c, r, None)
             };
+            if let Some(next_action) = v["hc"].get("next_action").cloned() {
+                v["next_action"] = next_action;
+            }
         }
         if action == "result" {
             v["result_summary"] = core::compact_summary(c, r)?;
@@ -993,7 +996,17 @@ pub fn open(c: &Context, a: &Value) -> Result<Value> {
         match open_one(c, &id, a["profile"].as_str()) {
             Ok(v) => results.push(v),
             Err(e) => {
-                let mut v = json!({"task":id,"action":"error","error":e.to_string(),"error_code":error_code(&e),"next_action":"Прочитайте файлы указанного запуска и docs/recovery.md программы"});
+                let hc_unavailable = e.is::<hc::ConnectionUnavailable>();
+                let next_action = if hc_unavailable {
+                    let mut operation = format!("open {}", quote(&id));
+                    if let Some(profile) = a["profile"].as_str() {
+                        operation.push_str(&format!(" --profile {}", quote(profile)));
+                    }
+                    hc::retry(c, &operation)
+                } else {
+                    "Прочитайте файлы указанного запуска и docs/recovery.md программы".into()
+                };
+                let mut v = json!({"task":id,"action":"error","error":e.to_string(),"error_code":error_code(&e),"next_action":next_action});
                 if let Ok(t) = c.task(&id) {
                     extend(
                         &mut v,
@@ -1007,6 +1020,11 @@ pub fn open(c: &Context, a: &Value) -> Result<Value> {
                             &mut v,
                             json!({"run":run,"run_status":r["status"],"state":c.run_file(run)?,"tab":r["tab"],"pane":r["pane"]}),
                         );
+                        if hc_unavailable && hc::enabled(&r) {
+                            v["adapter"] = r["adapter"].clone();
+                            v["hc"] = hc::client(c, &r, None);
+                            v["hc"]["terminal_state"] = json!("unknown");
+                        }
                     }
                 }
                 results.push(v);

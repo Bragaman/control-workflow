@@ -234,6 +234,9 @@ pub fn worktree_mutation_state(r: &Value) -> ProcessState {
         .unwrap_or(ProcessState::Unknown)
 }
 pub fn error_code(error: &anyhow::Error) -> String {
+    if let Some(unavailable) = error.downcast_ref::<crate::hc::ConnectionUnavailable>() {
+        return unavailable.code().into();
+    }
     serde_json::from_str::<Value>(&error.to_string())
         .ok()
         .and_then(|v| v["error"]["code"].as_str().map(str::to_owned))

@@ -11,8 +11,11 @@ description: Открыть или запустить выбранные пол�
 если плана ещё нет, его составляет исполнитель.
 
 Используй выбранную абсолютную команду с её state/config/bindings из контракта
-или задания. При hc-codex открой задачу без флага TUI-сессии. Для подключения к готовому исполнителю используй hc.attach из open или run --compact на указанной машине. Для TUI вне herdr перед подкомандой укажи `--herdr-session NAME`, выбрав
-имя по `herdr session list`:
+или задания. При `hc-codex` вызови `open TASK…` без `--herdr-session`.
+В Desktop ищи пространство `hc.space` и вкладку `hc.tab`. Из консоли на машине
+исполнителя подключайся по `hc.attach` из `open` или `run --compact`.
+Для legacy Herdr TUI вне herdr перед подкомандой укажи `--herdr-session NAME`,
+выбрав имя по `herdr session list`:
 
 ```sh
 control-workflow --state-root STATE --config CONFIG --bindings-root BINDINGS --herdr-session NAME open TASK1 TASK2
@@ -20,7 +23,7 @@ control-workflow --state-root STATE --config CONFIG --bindings-root BINDINGS --h
 
 Здесь `control-workflow` обозначает абсолютный путь выбранной программы, остальные
 значения — выбранные пути и ID. В herdr флаг session не нужен. При запрете сокета
-повтори эту же команду вне песочницы; не создавай второй запуск через `start`.
+legacy Herdr повтори эту же команду из консоли с доступом к Herdr.
 Если экземпляр и профиль уже известны, повторные `environment`, `show` и чтение
 контракта перед `open` не нужны. Ответ содержит цель и сведения запуска.
 
@@ -37,7 +40,9 @@ open переиспользует работающего исполнителя,
 Он влияет только на новый запуск. Несовместимый запрос для работающего исполнителя
 возвращает ошибку; сохрани checkpoint и явно подготовь новый запуск для смены.
 
-При action=error прочитай [recovery.md](../../docs/recovery.md) и файлы указанного
-запуска. Для blocked используй протокол [questions.md](../../docs/questions.md).
+При `hc_access_denied` или `hc_unavailable` повтори команду из `next_action` в
+консоли на машине исполнителя под тем же пользователем с доступом к hc. При остальных `action=error`
+прочитай [recovery.md](../../docs/recovery.md) и файлы указанного запуска.
+Для blocked используй протокол [questions.md](../../docs/questions.md).
 Сообщение о запуске или продолжении начинай с целевого `TASK_ID: `. Перед
 ручной командой укажи машину и затрагиваемый процесс.
