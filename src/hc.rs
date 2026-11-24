@@ -3,6 +3,7 @@
 use crate::{args::s, config::Context, external};
 use anyhow::{Result, anyhow, bail, ensure};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     fmt,
     io::{self, BufRead, BufReader, Read, Write},
@@ -306,6 +307,220 @@ pub fn confirm(r: &mut Value, v: &Value) -> Result<()> {
     Ok(())
 }
 
+fn set_layout(r: &mut Value, t: &Value) {
+    let repo = s(&r["worktrees"][0], "repository");
+    let (space, name, folder) = if repo.is_empty() {
+        let project = s(r, "project");
+        (
+            format!("workflow-{project}"),
+            project.to_owned(),
+            r["cwd"].clone(),
+        )
+    } else {
+        // Worktree preparation has already resolved the repository path.
+        let hash = format!("{:x}", Sha256::digest(repo.as_bytes()));
+        let basename = Path::new(repo)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("repo");
+        let basename = basename.replace(char::is_control, " ");
+        (
+            format!("repo-{basename}-{}", &hash[..16]),
+            format!("{basename} · {}", &hash[..8]),
+            json!(repo),
+        )
+    };
+    let title = s(t, "title").trim();
+    let tab_name = if title.is_empty() { s(t, "id") } else { title };
+    r["workspace"] = json!(space);
+    r["tab"] = json!(format!("task-{}-{}", s(r, "task"), s(r, "id")));
+    r["hc_desktop"] = json!({"space_name":name,"tab_name":tab_name,"folder":folder});
+}
+
+fn tree_has_terminal(node: &Value, address: &Value) -> bool {
+    node["content"]["terminal"] == *address
+        || ["children", "floating"].iter().any(|key| {
+            node[*key]
+                .as_array()
+                .is_some_and(|children| children.iter().any(|n| tree_has_terminal(n, address)))
+        })
+}
+
+// Desktop adopts the labels as IDs and gives an adopted tab an automatic
+// caption. Set its name in the same machine-owned document Desktop uses.
+fn place_in_desktop(document: &mut Value, r: &Value) -> Result<bool> {
+    if document.is_null() {
+        *document = json!({"spaces":[]});
+    }
+    let spaces = document
+        .get_mut("spaces")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("Неизвестный формат раскладки Herdr Desktop"))?;
+    let tab_name = r["hc_desktop"]["tab_name"].as_str().unwrap_or(s(r, "task"));
+    let mut target = None;
+    for space in spaces.iter_mut() {
+        let wanted_space = space["id"] == r["workspace"];
+        let tabs = space
+            .get_mut("tabs")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| anyhow!("Нет списка вкладок в раскладке Herdr Desktop"))?;
+        for tab in tabs {
+            if tree_has_terminal(&tab["root"], &r["pane"]) {
+                // Desktop could have adopted the labels already, or someone
+                // moved or named the tab. Respect existing placement and names.
+                if wanted_space && tab["id"] == r["tab"] && s(tab, "name").is_empty() {
+                    tab["name"] = json!(tab_name);
+                    if s(space, "name").is_empty() {
+                        space["name"] = r["hc_desktop"]["space_name"].clone();
+                    }
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+            ensure!(
+                tab["id"] != r["tab"],
+                "Вкладка Herdr Desktop занята другим терминалом"
+            );
+        }
+        if wanted_space {
+            ensure!(target.is_none(), "Пространство Herdr Desktop неоднозначно");
+            target = Some(space);
+        }
+    }
+    let tab = json!({"id":r["tab"],"name":tab_name,"root":desktop_tab_root(r)});
+    if let Some(space) = target {
+        space["tabs"].as_array_mut().unwrap().push(tab);
+        if s(space, "name").is_empty() {
+            space["name"] = r["hc_desktop"]["space_name"].clone();
+        }
+    } else {
+        spaces.push(desktop_space(r, vec![tab]));
+    }
+    Ok(true)
+}
+
+fn desktop_space(r: &Value, tabs: Vec<Value>) -> Value {
+    json!({"id":r["workspace"],"name":r["hc_desktop"]["space_name"],
+        "folder":r["hc_desktop"]["folder"],"tabs":tabs})
+}
+
+fn desktop_tab_root(r: &Value) -> Value {
+    json!({"id":r["tab"],"type":"row","children":[{
+        "id":format!("pane-{}", s(r, "id")), "type":"block",
+        "content":{"terminal":r["pane"]}
+    }]})
+}
+
+fn remove_from_desktop(document: &mut Value, r: &Value) -> Result<bool> {
+    if document.is_null() {
+        return Ok(false);
+    }
+    let spaces = document
+        .get_mut("spaces")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("Неизвестный формат раскладки Herdr Desktop"))?;
+    let Some(index) = spaces
+        .iter()
+        .position(|space| space["id"] == r["workspace"])
+    else {
+        return Ok(false);
+    };
+    let space = &mut spaces[index];
+    let tabs = space
+        .get_mut("tabs")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("Нет списка вкладок в раскладке Herdr Desktop"))?;
+    let owned_root = desktop_tab_root(r);
+    // Clean up the pane Workflow inserted. Desktop handles its own panes and
+    // layouts the viewer has since rearranged or split.
+    let Some(index_tab) = tabs
+        .iter()
+        .position(|tab| tab["id"] == r["tab"] && tab["root"] == owned_root)
+    else {
+        return Ok(false);
+    };
+    tabs.remove(index_tab);
+    if *space == desktop_space(r, Vec::new()) {
+        spaces.remove(index);
+    }
+    Ok(true)
+}
+
+impl Connection {
+    fn name_desktop_tab(&mut self, r: &mut Value, terminal: &Value) {
+        // Only new records opt in. A terminal whose labels were changed by the
+        // viewer is already under its control.
+        if r["hc_desktop"].is_null() {
+            return;
+        }
+        let result = if terminal["labels"]["herdr.space"] == r["workspace"]
+            && terminal["labels"]["herdr.tab"] == r["tab"]
+        {
+            self.update_desktop_document(r, place_in_desktop)
+        } else {
+            Ok(())
+        };
+        r["hc_desktop"]["error"] = json!(result.err().map(|e| e.to_string()));
+    }
+
+    fn update_desktop_document(
+        &mut self,
+        r: &Value,
+        edit: fn(&mut Value, &Value) -> Result<bool>,
+    ) -> Result<()> {
+        // Bound layout operations under the Workflow state lock. This
+        // connection is discarded after updating the document.
+        let stream = self.stream.get_mut();
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+        for _ in 0..3 {
+            let mut doc = self.call("doc.get", json!({"name":"herdr-app"}))?;
+            ensure!(
+                doc["version"].is_u64() && doc.get("value").is_some(),
+                "Некорректный ответ hc doc.get"
+            );
+            if !edit(&mut doc["value"], r)? {
+                return Ok(());
+            }
+            let reply = self.request(
+                "doc.set",
+                json!({"name":"herdr-app", "version":doc["version"], "value":doc["value"]}),
+            )?;
+            if reply["error"]["data"]["kind"] == "conflict" {
+                continue;
+            }
+            ensure!(
+                reply["result"]["version"].is_u64(),
+                "hc doc.set: {}",
+                reply["error"]
+            );
+            return Ok(());
+        }
+        bail!("Раскладка Herdr Desktop менялась во время записи")
+    }
+}
+
+pub fn recover(c: &Context, r: &mut Value) -> Result<()> {
+    let mut conn = Connection::open(c, r)?;
+    let v = conn
+        .terminal(r)?
+        .ok_or_else(|| anyhow!("Терминал hc отсутствует"))?;
+    confirm(r, &v)?;
+    conn.name_desktop_tab(r, &v);
+    Ok(())
+}
+
+pub fn retry_desktop(c: &Context, r: &mut Value) -> bool {
+    if !enabled(r) || !r["hc_desktop"]["error"].is_string() {
+        return false;
+    }
+    let previous = r["hc_desktop"]["error"].clone();
+    if let Err(error) = recover(c, r) {
+        r["hc_desktop"]["error"] = json!(error.to_string());
+    }
+    r["hc_desktop"]["error"] != previous
+}
+
 pub fn launch(c: &Context, id: &str, cwd: &Path, t: &mut Value, r: &mut Value) -> Result<Value> {
     let _lock = c.lock()?;
     *t = c.task(s(r, "task"))?;
@@ -347,24 +562,22 @@ pub fn launch(c: &Context, id: &str, cwd: &Path, t: &mut Value, r: &mut Value) -
     r["agent_start_intent"] = json!(true);
     r["hc_owner"] = json!(uuid::Uuid::new_v4().simple().to_string());
     r["hc_name"] = json!(format!("cp-{}", id.trim_start_matches("run-")));
-    r["workspace"] = json!(format!("workflow-{}", s(t, "project")));
-    r["tab"] = json!(format!("workflow-{id}"));
+    set_layout(r, t);
     c.update(r, t)?;
     let started = conn.call("terminal.run",json!({"argv":argv,"name":r["hc_name"],"cwd":r["cwd"],"keep":true,"no_parent":true,
         "labels":{"herdr.space":r["workspace"],"herdr.tab":r["tab"],"workflow.run":r["id"],"workflow.owner":r["hc_owner"]}}));
     // On lost acknowledgement reconnect to the same verified core and look up
     // the journalled name. Never submit terminal.run again for this intent.
-    let observation = if started.is_err() {
-        terminal(c, r)
-    } else {
-        conn.terminal(r)
-    };
     if let Err(e) = started {
         r["startup_error"] = json!(e.to_string());
         c.update(r, t)?;
+        conn = Connection::open(c, r)?;
     }
-    let v = observation?.ok_or_else(|| anyhow!("Исполнитель hc завершился при старте"))?;
+    let v = conn
+        .terminal(r)?
+        .ok_or_else(|| anyhow!("Исполнитель hc завершился при старте"))?;
     confirm(r, &v)?;
+    conn.name_desktop_tab(r, &v);
     r["agent_start_completed"] = json!(true);
     r["status"] = json!("running");
     c.update(r, t)?;
@@ -376,6 +589,9 @@ pub fn client(c: &Context, r: &Value, v: Option<&Value>) -> Value {
     let mut result = json!({"machine":r["herdr_namespace"]["machine"],"core_id":r["herdr_namespace"]["core"],
         "session":r["herdr_session"],"address":address,"space":r["workspace"],"tab":r["tab"],
         "terminal_state":v.map(|t| &t["state"]),"agent_status":v.map(|t| &t["status"])});
+    if let Some(error) = r["hc_desktop"]["error"].as_str() {
+        result["desktop_layout_error"] = json!(error);
+    }
     if let Some(terminal) = v.filter(|v| v["argv"] == r["launch_argv"]) {
         // Local IDs repeat across cores, even with the same HC_SESSION.
         // Let hc resolve the owning core and terminal in the attach request.
@@ -449,7 +665,7 @@ impl Connection {
     }
 }
 
-pub fn close(c: &Context, r: &Value) -> Result<()> {
+pub fn close(c: &Context, r: &mut Value) -> Result<()> {
     let mut conn = Connection::open(c, r)?;
     if let Some(v) = conn.closing_terminal(r)? {
         let address = &v["address"];
@@ -461,5 +677,32 @@ pub fn close(c: &Context, r: &Value) -> Result<()> {
             "hc не подтвердил завершение терминала"
         );
     }
+    if desktop_cleanup_pending(r) {
+        let result = conn.update_desktop_document(r, remove_from_desktop);
+        save_desktop_cleanup(r, result);
+    }
     Ok(())
+}
+
+fn desktop_cleanup_pending(r: &Value) -> bool {
+    enabled(r)
+        && r["hc_desktop"].is_object()
+        && r["pane"].is_string()
+        && r["hc_created_ms"].is_u64()
+        && r["cleanup"]["desktop_layout_done"] != true
+}
+
+fn save_desktop_cleanup(r: &mut Value, result: Result<()>) {
+    r["cleanup"]["desktop_layout_done"] = json!(result.is_ok());
+    r["cleanup"]["desktop_layout_error"] = json!(result.err().map(|e| e.to_string()));
+}
+
+pub fn retry_desktop_cleanup(c: &Context, r: &mut Value) -> bool {
+    if !desktop_cleanup_pending(r) {
+        return false;
+    }
+    let result = Connection::open(c, r)
+        .and_then(|mut conn| conn.update_desktop_document(r, remove_from_desktop));
+    save_desktop_cleanup(r, result);
+    true
 }

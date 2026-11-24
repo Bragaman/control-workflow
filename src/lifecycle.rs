@@ -483,8 +483,7 @@ fn confirm_agent_start(r: &mut Value) {
 }
 pub fn mark_recovered(c: &Context, r: &mut Value, t: &mut Value) -> Result<()> {
     if hc::enabled(r) {
-        let v = hc::terminal(c, r)?.ok_or_else(|| anyhow!("Терминал hc отсутствует"))?;
-        hc::confirm(r, &v)?;
+        hc::recover(c, r)?;
     }
     capture_session(c, r);
     confirm_agent_start(r);
@@ -879,11 +878,11 @@ fn summary(c: &Context, t: &Value, r: Option<&Value>, action: &str) -> Result<Va
     Ok(v)
 }
 fn open_one(c: &Context, id: &str, requested: Option<&str>) -> Result<Value> {
-    let t = c.task(id)?;
+    let mut t = c.task(id)?;
     let selected = requested
         .map(|name| core::profile_for_run(c, &t, Some(name)))
         .transpose()?;
-    let r = t["active_run"]
+    let mut r = t["active_run"]
         .as_str()
         .map(|id| c.read(&c.run_file(id)?))
         .transpose()?;
@@ -893,11 +892,22 @@ fn open_one(c: &Context, id: &str, requested: Option<&str>) -> Result<Value> {
             "--profile требует нового запуска; задача находится в {}",
             t["status"]
         );
+        if t["status"] == "review"
+            && let Some(r) = &mut r
+            && hc::retry_desktop(c, r)
+        {
+            c.update(r, &mut t)?;
+        }
         return summary(c, &t, r.as_ref(), "result");
     }
-    if r.as_ref().is_some_and(|r| r["status"] == "blocked") {
-        crate::policy::check_reuse(selected.as_ref(), r.as_ref().unwrap())?;
-        return summary(c, &t, r.as_ref(), "awaiting_answer");
+    if let Some(r) = &mut r
+        && r["status"] == "blocked"
+    {
+        crate::policy::check_reuse(selected.as_ref(), r)?;
+        if hc::retry_desktop(c, r) {
+            c.update(r, &mut t)?;
+        }
+        return summary(c, &t, Some(r), "awaiting_answer");
     }
     if let Some(mut r) = r {
         reconcile_launcher(c, &mut r)?;
@@ -930,8 +940,11 @@ fn open_one(c: &Context, id: &str, requested: Option<&str>) -> Result<Value> {
                         mark_recovered(c, &mut r, &mut t)?;
                         "recovered"
                     } else {
+                        let layout_changed = hc::retry_desktop(c, &mut r);
                         if needs_identity {
                             confirm_agent_start(&mut r);
+                        }
+                        if needs_identity || layout_changed {
                             c.update(&mut r, &mut t)?;
                         }
                         "existing"
@@ -2172,10 +2185,13 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
     // A confirmed cleanup is final. Herdr can reuse IDs after a restart;
     // probing or closing those IDs again could affect unrelated user work.
     if t["status"] == status
-        && let Some(r) = &r
+        && let Some(r) = &mut r
         && r["status"] == status
         && ["closed", "no_tab"].contains(&s(&r["cleanup"], "status"))
     {
+        if hc::retry_desktop_cleanup(c, r) {
+            c.update(r, &mut t)?;
+        }
         return completion_result(c, &mut t, r.clone());
     }
     let mut tab = None;

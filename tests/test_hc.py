@@ -15,6 +15,7 @@ from pathlib import Path
 root = Path(os.environ['CONTROL_PLANE_ROOT'])
 peer = (root / 'core').read_text()
 state = root / (peer + '.json')
+document = root / (peer + '-desktop.json')
 status = {'core': {'id': peer}}
 fault = (root / 'fault').read_text()
 if sys.argv[1:] == ['--json', 'server', 'start']:
@@ -35,7 +36,11 @@ for line in sys.stdin:
     method, p = req['method'], req['params']
     reply = {'jsonrpc': '2.0', 'id': req['id']}
     fault = (root / 'fault').read_text()
-    t = json.loads(state.read_text()) if state.exists() else None
+    paths = [state, *root.glob(peer + '-t*.json')]
+    terminals = {path: json.loads(path.read_text()) for path in paths if path.exists()}
+    selected = next(((path, t) for path, t in terminals.items()
+                     if p.get('terminal') in (t['name'], t['address'])), (None, None))
+    path, t = selected
     if method == 'server.status':
         result = status
     elif method == 'terminal.run':
@@ -43,23 +48,48 @@ for line in sys.stdin:
             print(p['name'], file=f)
         if fault == 'before-run':
             sys.exit(1)
-        t = dict(address='t1', created_ms=123, state='live', status={'state':'working'}, **p)
-        state.write_text(json.dumps(t))
+        address = f't{len(terminals) + 1}'
+        path = state if address == 't1' else root / f'{peer}-{address}.json'
+        t = dict(address=address, created_ms=123, state='live', status={'state':'working'}, **p)
+        path.write_text(json.dumps(t))
         if fault in ('lost-reply', 'disconnected'):
             sys.exit(1)
-        result = {'address':'t1'}
+        result = {'address':address}
     elif method == 'terminal.get':
         if fault == 'disconnected': sys.exit(1)
-        if t is None or p['terminal'] not in (t['name'],t['address']):
+        if t is None:
             reply['error'] = {'code': -32000,'data': {'kind':'not_found'}}
         result = t
     elif method == 'terminal.list':
-        result = {'terminals': [t, {'parent':'t1', 'die_with_parent':True}] if fault=='child' else [t]}
+        members = list(terminals.values())
+        if fault == 'child':
+            members.append({'parent':'t1', 'die_with_parent':True})
+        result = {'terminals': members}
     elif method == 'terminal.kill':
         assert t['address'] == p['terminal']
         t['state'] = 'finished'
-        state.write_text(json.dumps(t))
+        path.write_text(json.dumps(t))
         result = t
+    elif method == 'doc.get':
+        assert p == {'name':'herdr-app'}
+        result = json.loads(document.read_text()) if document.exists() else {'value':None, 'version':0}
+        if fault == 'doc-unavailable':
+            reply['error'] = {'data':{'kind':'unavailable'}}
+    elif method == 'doc.set':
+        assert p['name'] == 'herdr-app'
+        if fault == 'doc-race' and not document.exists():
+            # A viewer adopted the terminal after doc.get and before doc.set.
+            value = p['value']
+            value['spaces'][0]['name'] = 'Viewer space name'
+            value['spaces'][0]['tabs'][0]['name'] = ''
+            value['spaces'][0]['viewer_extra'] = {'keep': True}
+            document.write_text(json.dumps({'value':value, 'version':1}))
+            reply['error'] = {'data':{'kind':'conflict'}}
+        else:
+            version = json.loads(document.read_text())['version'] if document.exists() else 0
+            assert p['version'] == version
+            result = {'version':version + 1}
+            document.write_text(json.dumps({**result, 'value':p['value']}))
     else:
         raise AssertionError(method)
     if 'error' not in reply: reply['result'] = result
@@ -97,6 +127,170 @@ class CoreTransportTests(unittest.TestCase):
     def adapter(self, name):
         self.settings['adapter'] = name
         self.config.write_text(json.dumps(self.settings))
+
+    def desktop(self):
+        return json.loads((self.root / 'original-desktop.json').read_text())
+
+    def test_layout_groups_by_first_repository_and_keeps_tabs_separate(self):
+        repos = [self.root / parent / 'repo' for parent in ('first', 'second')]
+        for repo in repos:
+            repo.mkdir(parents=True)
+            fixture.ControlTests.git(self, repo, 'init', '-b', 'main')
+            fixture.ControlTests.git(self, repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.com',
+                                     'commit', '--allow-empty', '-m', 'init')
+        alias = self.root / 'alias'
+        alias.symlink_to(repos[0], target_is_directory=True)
+        self.create('first', '--code', '--repo', str(repos[0]), '--repo', str(repos[1]))
+        self.create('same', '--code', '--repo', str(alias))
+        self.create('second', '--code', '--repo', str(repos[1]))
+        self.cli('task-set', 'second', '--title', '  Другой репозиторий  ')
+        self.cli('task-set', 'task1', '--title', '   ')
+        ids = ['first', 'same', 'second', 'task1']
+        titles = ['Проверка', 'Проверка', 'Другой репозиторий', 'task1']
+        opened = self.cli('open', *ids)
+        runs = [self.wait_run(item['run']) for item in opened]
+        first, same, second, no_code = runs
+        self.assertEqual(first['cwd'], first['worktrees'][0]['path'])
+        self.assertEqual(first['workspace'], same['workspace'])
+        self.assertNotEqual(first['workspace'], second['workspace'])
+        self.assertTrue(first['workspace'].startswith('repo-repo-'))
+        self.assertTrue(second['workspace'].startswith('repo-repo-'))
+        self.assertEqual(no_code['workspace'], 'workflow-lab')
+        self.assertEqual(len({run['pane'] for run in runs}), 4)
+        self.assertEqual(len({run['tab'] for run in runs}), 4)
+        spaces = {space['id']: space for space in self.desktop()['value']['spaces']}
+        self.assertEqual(len(spaces), 3)
+        self.assertEqual(spaces[first['workspace']]['folder'], str(repos[0]))
+        self.assertEqual(spaces[second['workspace']]['folder'], str(repos[1]))
+        self.assertNotEqual(spaces[first['workspace']]['name'], spaces[second['workspace']]['name'])
+        self.assertEqual(spaces[no_code['workspace']]['name'], 'lab')
+        for task, title, run in zip(ids, titles, runs):
+            with self.subTest(task=task):
+                suffix = '' if run['pane'] == 't1' else f"-{run['pane']}"
+                terminal = json.loads((self.root / f'original{suffix}.json').read_text())
+                labels = terminal['labels']
+                compact = self.cli('run', run['id'], '--compact')['hc']
+                self.assertEqual(compact, self.cli('open', task)[0]['hc'])
+                self.assertEqual(labels['herdr.space'], compact['space'])
+                self.assertEqual(labels['herdr.tab'], compact['tab'])
+                self.assertEqual(labels['workflow.run'], run['id'])
+                self.assertEqual(compact['attach']['argv'][-1], f"original/{run['pane']}")
+                tab = next(t for t in spaces[compact['space']]['tabs'] if t['id'] == compact['tab'])
+                self.assertEqual(tab['name'], title)
+                self.assertEqual(tab['root']['children'][0]['content']['terminal'], run['pane'])
+        self.assertEqual(len((self.root / 'spawns').read_text().splitlines()), 4)
+        self.assertEqual(self.cli('complete', 'first', '--status', 'cancelled')['cleanup']['status'], 'closed')
+        remaining = {space['id']: space for space in self.desktop()['value']['spaces']}
+        self.assertEqual([t['id'] for t in remaining[first['workspace']]['tabs']], [same['tab']])
+        self.assertEqual(remaining[second['workspace']], spaces[second['workspace']])
+        for task in ids[1:]:
+            self.assertEqual(self.cli('complete', task, '--status', 'cancelled')['cleanup']['status'], 'closed')
+        self.assertEqual(self.desktop()['value']['spaces'], [])
+
+    def test_desktop_concurrent_adoption_preserves_viewer_changes(self):
+        self.fault.write_text('doc-race')
+        run = self.wait_run(self.cli('start', 'task1')['run'])
+        document = self.desktop()
+        self.assertEqual(document['version'], 2)
+        space, = document['value']['spaces']
+        self.assertEqual(space['name'], 'Viewer space name')
+        self.assertEqual(space['viewer_extra'], {'keep': True})
+        tab, = space['tabs']
+        self.assertEqual((tab['id'], tab['name']), (run['tab'], 'Проверка'))
+        self.cli('open', 'task1')
+        self.assertEqual(self.desktop(), document)
+
+    def test_desktop_failure_preserves_running_terminal_and_recovers_on_open(self):
+        self.fault.write_text('doc-unavailable')
+        run = self.wait_run(self.cli('start', 'task1')['run'])
+        info = self.cli('open', 'task1')[0]['hc']
+        self.assertEqual(info, self.cli('run', run['id'], '--compact')['hc'])
+        self.assertIn('doc.get', info['desktop_layout_error'])
+        self.assertEqual(info['attach']['argv'][-1], 'original/t1')
+        self.fault.write_text('')
+        reopened = self.cli('open', 'task1')[0]
+        self.assertEqual((reopened['action'], reopened['run']), ('existing', run['id']))
+        self.assertNotIn('desktop_layout_error', reopened['hc'])
+        self.assertEqual(reopened['hc']['attach'], info['attach'])
+        tab, = self.desktop()['value']['spaces'][0]['tabs']
+        self.assertEqual((tab['id'], tab['name']), (run['tab'], 'Проверка'))
+        self.assertEqual(len((self.root / 'spawns').read_text().splitlines()), 1)
+
+    def test_desktop_repair_uses_launch_title_after_task_rename(self):
+        self.cli('task-set', 'task1', '--agent-review-policy', 'off')
+        self.fault.write_text('doc-unavailable')
+        run = self.wait_run(self.cli('start', 'task1')['run'])
+        report = self.root / 'report.md'
+        report.write_text('Результат')
+        self.cli('finish', '--run', run['id'], '--report', str(report))
+        self.cli('task-set', 'task1', '--title', 'Новое название')
+        self.fault.write_text('')
+        result = self.cli('open', 'task1')[0]
+        self.assertEqual(result['action'], 'result')
+        self.assertNotIn('desktop_layout_error', result['hc'])
+        tab, = self.desktop()['value']['spaces'][0]['tabs']
+        self.assertEqual((tab['id'], tab['name']), (run['tab'], 'Проверка'))
+
+    def test_desktop_repair_accepts_run_without_saved_tab_name(self):
+        self.fault.write_text('doc-unavailable')
+        run = self.wait_run(self.cli('start', 'task1')['run'])
+        run['hc_desktop'].pop('tab_name')
+        (self.root / 'runs' / run['id'] / 'state.json').write_text(json.dumps(run))
+        self.fault.write_text('')
+        result = self.cli('open', 'task1')[0]
+        self.assertEqual((result['action'], result['run']), ('existing', run['id']))
+        tab, = self.desktop()['value']['spaces'][0]['tabs']
+        self.assertEqual((tab['id'], tab['name']), (run['tab'], 'task1'))
+
+    def test_desktop_repair_and_cleanup_keep_moved_user_tab(self):
+        self.fault.write_text('doc-unavailable')
+        run = self.wait_run(self.cli('start', 'task1')['run'])
+        document = {'version':1, 'value':{'spaces':[{
+            'id':'user-space', 'name':'User space', 'tabs':[{
+                'id':'user-tab', 'name':'User tab', 'root':{'type':'block', 'content':{'terminal':run['pane']}}
+            }]
+        }]}}
+        (self.root / 'original-desktop.json').write_text(json.dumps(document))
+        self.fault.write_text('')
+        self.assertNotIn('desktop_layout_error', self.cli('open', 'task1')[0]['hc'])
+        self.assertEqual(self.desktop(), document)
+        self.assertEqual(self.cli('complete', 'task1', '--status', 'cancelled')['cleanup']['status'], 'closed')
+        self.assertEqual(self.desktop(), document)
+
+    def test_desktop_cleanup_retries_without_closing_a_reused_terminal(self):
+        self.wait_run(self.cli('start', 'task1')['run'])
+        self.fault.write_text('doc-unavailable')
+        closed = self.cli('complete', 'task1', '--status', 'cancelled')['cleanup']
+        self.assertEqual(closed['status'], 'closed')
+        self.assertIn('doc.get', closed['desktop_layout_error'])
+        self.assertEqual(len(self.desktop()['value']['spaces']), 1)
+        path = self.root / 'original.json'
+        replacement = {**json.loads(path.read_text()), 'name':'foreign', 'state':'live', 'labels':{}}
+        path.write_text(json.dumps(replacement))
+        self.fault.write_text('')
+        closed = self.cli('complete', 'task1', '--status', 'cancelled')['cleanup']
+        self.assertTrue(closed['desktop_layout_done'])
+        self.assertIsNone(closed['desktop_layout_error'])
+        self.assertEqual(self.desktop()['value']['spaces'], [])
+        self.assertEqual(json.loads(path.read_text()), replacement)
+
+    def test_existing_hc_record_keeps_its_old_labels(self):
+        run = self.wait_run(self.cli('start', 'task1')['run'])
+        run.pop('hc_desktop')
+        run['tab'] = 'workflow-' + run['id']
+        record = self.root / 'runs' / run['id'] / 'state.json'
+        record.write_text(json.dumps(run))
+        path = self.root / 'original.json'
+        terminal = json.loads(path.read_text())
+        terminal['labels']['herdr.tab'] = run['tab']
+        path.write_text(json.dumps(terminal))
+        old = self.cli('run', run['id'], '--compact')['hc']
+        self.assertEqual((old['space'], old['tab']), ('workflow-lab', run['tab']))
+        self.assertEqual(old['attach']['argv'][-1], 'original/t1')
+        self.assertEqual(self.cli('open', 'task1')[0]['hc'], old)
+        self.assertEqual(json.loads(path.read_text()), terminal)
+        self.assertEqual(self.cli('complete', 'task1', '--status', 'cancelled')['cleanup']['status'], 'closed')
+        self.assertEqual(json.loads(path.read_text())['labels'], terminal['labels'])
 
     def test_open_denied_access_has_retry_without_recording_a_run(self):
         faults = [('core-lock', 'hc_access_denied', 'cannot open core lock'),
@@ -219,7 +413,11 @@ class CoreTransportTests(unittest.TestCase):
         self.fault.write_text('')
         reopened = self.cli('open', 'task1')[0]
         self.assertEqual((reopened['run'], reopened['action']), (run, 'recovered'))
-        self.assertEqual(self.cli('run', run)['pane'], 't1')
+        prior = self.cli('run', run)
+        self.assertEqual(prior['pane'], 't1')
+        self.assertEqual((reopened['hc']['space'], reopened['hc']['tab']), (prior['workspace'], prior['tab']))
+        tab, = self.desktop()['value']['spaces'][0]['tabs']
+        self.assertEqual((tab['id'], tab['name']), (prior['tab'], 'Проверка'))
         self.assertEqual(len((self.root / 'spawns').read_text().splitlines()), 1)
 
     def test_absence_after_unacknowledged_request_never_replays(self):
