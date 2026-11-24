@@ -48,6 +48,9 @@ pub fn cli() -> Command {
                     arg = arg.action(ArgAction::Append);
                     if flags.is_empty() {
                         arg = arg.num_args(1..);
+                        if spec["name"] == "temp-exec" {
+                            arg = arg.last(true);
+                        }
                     }
                 }
                 if let Some(choices) = option["choices"].as_array() {

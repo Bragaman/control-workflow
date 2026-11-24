@@ -213,6 +213,7 @@ pub(crate) fn compact_summary(c: &Context, r: &Value) -> Result<Value> {
         ("git_completion", &r["git_completion"]),
         ("worktree_cleanup", &r["worktree_cleanup"]),
         ("cleanup", &r["cleanup"]),
+        ("temporary_cleanup", &r["temporary_cleanup"]),
     ] {
         let state = s(item, "status");
         if ["pending", "running", "failed"].contains(&state)
@@ -313,6 +314,7 @@ pub(crate) fn compact_summary(c: &Context, r: &Value) -> Result<Value> {
 pub fn execute(c: &Context, name: &str, a: &Value) -> Result<Value> {
     crate::args::validate(name, a)?;
     match name {
+        "temp-sweep" => crate::run_temp::sweep(c),
         name if name.starts_with("schedule-") => crate::schedule::handle(c, name, a),
         "start" => {
             let _lock = c.lock()?;

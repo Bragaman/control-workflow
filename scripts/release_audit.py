@@ -32,7 +32,8 @@ NATIVE_FILES = {'build.rs', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
                 'tests/test_model_policy.py', 'tests/test_hc.py', 'tests/test_build_version.py', 'tests/mcp_client.py'} | {
     'src/' + name for name in ('args.rs', 'casefold.rs', 'commands.json', 'config.rs', 'core.rs',
                                'external.rs', 'git.rs', 'hc.rs', 'lib.rs', 'lifecycle.rs',
-                               'main.rs', 'mcp.rs', 'policy.rs', 'resources.rs', 'review.rs', 'schedule.rs', 'shipping.rs', 'store.rs')}
+                               'main.rs', 'mcp.rs', 'policy.rs', 'resources.rs', 'review.rs',
+                               'run_temp.rs', 'run_temp/inspector.rs', 'schedule.rs', 'shipping.rs', 'store.rs')}
 PUBLIC_DOCS = {'docs/guide/' + name for name in (
     'installation.md', 'first-task.md', 'workflow.md', 'settings.md', 'reference.md',
     'assets/roles.svg', 'assets/lifecycle.svg', 'assets/storage.svg', 'assets/style.css')}

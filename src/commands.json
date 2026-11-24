@@ -1771,6 +1771,45 @@
     "options": []
   },
   {
+    "name": "temp-exec",
+    "options": [
+      {
+        "name": "run",
+        "flags": ["--run"],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "slot",
+        "flags": ["--slot"],
+        "required": false,
+        "default": "worker",
+        "choices": null,
+        "multiple": false,
+        "boolean": false,
+        "integer": false
+      },
+      {
+        "name": "command",
+        "flags": [],
+        "required": true,
+        "default": null,
+        "choices": null,
+        "multiple": true,
+        "boolean": false,
+        "integer": false
+      }
+    ]
+  },
+  {
+    "name": "temp-sweep",
+    "options": []
+  },
+  {
     "name": "update",
     "options": [
       {

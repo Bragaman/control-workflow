@@ -6,7 +6,7 @@ use std::io::{self, BufRead, Write};
 const PROTOCOL: &str = "2025-06-18";
 const MAX_FRAME: usize = 16 * 1024 * 1024;
 pub fn tools() -> Vec<Value> {
-    args::registry().into_iter().filter(|v|!v["name"].as_str().unwrap().starts_with('_')&&!["mcp","install","package","update"].contains(&v["name"].as_str().unwrap())).map(|spec|{
+    args::registry().into_iter().filter(|v|!v["name"].as_str().unwrap().starts_with('_')&&!["mcp","install","package","update","temp-exec","temp-sweep"].contains(&v["name"].as_str().unwrap())).map(|spec|{
     let name=spec["name"].as_str().unwrap();let read_only=["environment","projects","tasks","show","run","memory-list","notifications","review-read","review-show"].contains(&name);let mut properties=json!({});let mut required=vec![];for option in spec["options"].as_array().unwrap(){let k=option["name"].as_str().unwrap();let mut schema=if option["boolean"]==true{json!({"type":"boolean"})}else if option["integer"]==true{json!({"type":"integer"})}else if option["multiple"]==true{json!({"type":"array","items":{"type":"string"}})}else{json!({"type":"string"})};if !option["choices"].is_null(){schema["enum"]=option["choices"].clone();}
 if !option["default"].is_null(){schema["default"]=option["default"].clone();}
 if option["required"]==true{required.push(k);}properties[k]=schema;}

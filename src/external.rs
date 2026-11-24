@@ -17,10 +17,18 @@ use std::{
 };
 /// Output is spooled to anonymous files so neither stream can fill a pipe.
 pub fn output(cmd: &mut Command, timeout: Duration) -> Result<(bool, String, String)> {
+    output_with_input(cmd, timeout, Stdio::null())
+}
+
+pub(crate) fn output_with_input(
+    cmd: &mut Command,
+    timeout: Duration,
+    input: Stdio,
+) -> Result<(bool, String, String)> {
     let mut out = tempfile::tempfile()?;
     let mut err = tempfile::tempfile()?;
     let mut child = cmd
-        .stdin(Stdio::null())
+        .stdin(input)
         .stdout(out.try_clone()?)
         .stderr(err.try_clone()?)
         .spawn()?;

@@ -1596,8 +1596,16 @@ pub fn assignment_text(c: &Context, r: &Value, t: &Value) -> Result<String> {
     } else {
         "нет".into()
     };
+    let temporary = if cfg!(target_os = "linux") {
+        format!(
+            "Сборки и тяжёлые проверки запускай через команду панели с подкомандой `temp-exec --run {} -- КОМАНДА АРГУМЕНТЫ`. Для временных файлов используй выданный TMPDIR.\n",
+            s(r, "id")
+        )
+    } else {
+        String::new()
+    };
     Ok(format!(
-        "# Задача {}: {}\n\nЦель: {}\n\nКритерии готовности: {}\n\nСостояние панели: {}\nРесурсы программы: {}\nЗапуск: {}\nАдаптер: {}\nПрофиль: {}; выбор: {}.\nМодель: {}; reasoning effort: {}.\nПроект: {} ({})\nРабочие деревья: {}\nЗавершение Git: {}; контракт: {}\nПриёмка: {}.\nПолитика агентского ревью: {}.\n\nДо работы прочитай контракт исполнителя: {}.\nПравила планирования: {}.\nПрочитай {}, если он есть; иначе {}.\nПредыдущий запуск: {}.\nАртефакты и checkpoint текущего запуска сохраняй в {}.\n\nКоманда панели (из любого cwd): {}\n",
+        "# Задача {}: {}\n\nЦель: {}\n\nКритерии готовности: {}\n\nСостояние панели: {}\nРесурсы программы: {}\nЗапуск: {}\nАдаптер: {}\nПрофиль: {}; выбор: {}.\nМодель: {}; reasoning effort: {}.\nПроект: {} ({})\nРабочие деревья: {}\nЗавершение Git: {}; контракт: {}\nПриёмка: {}.\nПолитика агентского ревью: {}.\n\nДо работы прочитай контракт исполнителя: {}.\nПравила планирования: {}.\nПрочитай {}, если он есть; иначе {}.\nПредыдущий запуск: {}.\nАртефакты и checkpoint текущего запуска сохраняй в {}.\n{temporary}\nКоманда панели (из любого cwd): {}\n",
         s(t, "id"),
         s(t, "title"),
         s(t, "goal"),
@@ -2060,8 +2068,9 @@ pub fn complete_request(c: &Context, a: &Value) -> Result<Value> {
         Ok(v) if !failure(&v) => request["status"] = json!("completed"),
         Ok(_) => {
             request["status"] = json!("failed");
-            request["error"] =
-                json!("Завершение не выполнено; проверьте git_completion и cleanup в state.json");
+            request["error"] = json!(
+                "Завершение не выполнено; проверьте git_completion, cleanup и temporary_cleanup в state.json"
+            );
         }
         Err(e) => {
             request["status"] = json!("failed");
@@ -2076,6 +2085,7 @@ pub fn failure(v: &Value) -> bool {
     v["action"] == "error"
         || v["action"] == "close_reviewers"
         || v["cleanup"]["status"] == "failed"
+        || v["temporary_cleanup"]["status"] == "failed"
         || (v["status"] != "cancelled"
             && (v["git_completion"]["status"] == "failed"
                 || v["worktree_cleanup"]["status"] == "failed"))
@@ -2166,9 +2176,7 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
         && r["status"] == status
         && ["closed", "no_tab"].contains(&s(&r["cleanup"], "status"))
     {
-        return Ok(
-            json!({"task":t["id"],"run":r["id"],"status":t["status"],"cleanup":r["cleanup"],"git_completion":r["git_completion"],"worktree_cleanup":r["worktree_cleanup"]}),
-        );
+        return completion_result(c, &mut t, r.clone());
     }
     let mut tab = None;
     let terminal_id = r
@@ -2328,6 +2336,16 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
     let Some(r) = &mut r else {
         return Ok(json!({"task":t["id"],"status":t["status"],"cleanup":"no_run"}));
     };
+    if let Err(error) = crate::run_temp::stop_task(c, &t) {
+        r["temporary_cleanup"] = json!({
+            "status":"failed",
+            "error":format!("{error:#}"),
+            "at":now(),
+            "next":"Устраните причину и повторите complete",
+        });
+        c.update(r, &mut t)?;
+        return Ok(completion_status(&t, r));
+    }
     r["cleanup"] = json!({"tab":r["tab"],"pane":r["pane"],"terminal_id":terminal_id,"workspace":r["workspace"],"at":now(),"status":"pending"});
     c.update(r, &mut t)?;
     let cleanup = (|| {
@@ -2359,9 +2377,30 @@ fn complete_locked(c: &Context, a: &Value) -> Result<Value> {
         }
     }
     c.update(r, &mut t)?;
-    Ok(
-        json!({"task":t["id"],"run":r["id"],"status":t["status"],"cleanup":r["cleanup"],"git_completion":r["git_completion"],"worktree_cleanup":r["worktree_cleanup"]}),
-    )
+    completion_result(c, &mut t, r.clone())
+}
+
+fn completion_result(c: &Context, t: &mut Value, mut r: Value) -> Result<Value> {
+    if ["closed", "no_tab"].contains(&s(&r["cleanup"], "status"))
+        && !["completed", "unsupported"].contains(&s(&r["temporary_cleanup"], "status"))
+    {
+        r["temporary_cleanup"] = crate::run_temp::cleanup_task(c, t)
+            .unwrap_or_else(|e| json!({"status":"failed","error":format!("{e:#}"),"at":now()}));
+        if r["temporary_cleanup"]["status"] == "failed" {
+            r["temporary_cleanup"]["next"] =
+                json!("Устраните причину в temporary_cleanup и повторите complete");
+        }
+        c.update(&mut r, t)?;
+    }
+    Ok(completion_status(t, &r))
+}
+
+fn completion_status(t: &Value, r: &Value) -> Value {
+    json!({
+        "task":t["id"],"run":r["id"],"status":t["status"],"cleanup":r["cleanup"],
+        "git_completion":r["git_completion"],"worktree_cleanup":r["worktree_cleanup"],
+        "temporary_cleanup":r["temporary_cleanup"],
+    })
 }
 
 /// Publish only: no acceptance, reviewer cleanup, detached worker or tab closure.

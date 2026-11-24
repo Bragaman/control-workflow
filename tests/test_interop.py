@@ -5,10 +5,13 @@ import hashlib
 import json
 import math
 import random
+import resource
+import stat
 import struct
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -48,8 +51,12 @@ class InteropTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         return json.loads(p.stdout)
 
-    def run_ready(self):
-        self.cli('task-create', 'one', '--project', 'demo', '--title', 'Interop', '--goal', 'Verify', '--acceptance', 'Contracts pass')
+    def run_ready(self, *options):
+        self.cli('task-create', 'one', '--project', 'demo', '--title', 'Interop', '--goal', 'Verify',
+                 '--acceptance', 'Contracts pass', *options)
+        return self.start_one()
+
+    def start_one(self):
         r = self.cli('start', 'one')['run']
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
@@ -58,6 +65,221 @@ class InteropTests(unittest.TestCase):
                 return state
             time.sleep(.02)
         self.fail(state)
+
+    def run_temp(self, run, program, *args, slot='worker'):
+        result = subprocess.run(
+            self.argv('temp-exec', '--run', run['id'], '--slot', slot, '--',
+                      sys.executable, '-c', program, *map(str, args)),
+            env=self.env, capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout.strip()
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux temporary storage')
+    def test_temporary_cache_is_reused_and_complete_cleans_all_runs(self):
+        first = self.run_ready('--agent-review-policy', 'manual')
+        paths = self.run_temp(first, '''
+import json, os
+from pathlib import Path
+cache, scratch = Path(os.environ['CARGO_TARGET_DIR']), Path(os.environ['TMPDIR'])
+(cache / "cache-entry").write_text("cached")
+(scratch / "scratch-entry").write_text("temporary")
+print(json.dumps([str(cache), str(scratch)]))
+''')
+        cache, scratch = map(Path, json.loads(paths))
+        self.assertEqual(cache.parts[-5:], ('workflow-temp', first['id'], 'cache', 'worker', 'cargo'))
+        self.assertTrue((scratch / 'scratch-entry').exists())
+        read_cache = '''
+import os
+from pathlib import Path
+print((Path(os.environ['CARGO_TARGET_DIR']) / 'cache-entry').read_text())
+'''
+        self.assertEqual(self.run_temp(first, read_cache), 'cached')
+        self.cli('interrupt', 'one', '--reason', 'Repeat')
+        skipped = self.start_one()
+        self.assertFalse((self.state / 'workflow-temp' / skipped['id']).exists())
+        self.cli('interrupt', 'one', '--reason', 'Aborted before checks')
+        latest = self.start_one()
+        previous = self.state / 'runs' / first['id']
+        ledger = previous / 'workflow-temp.json'
+        original = ledger.read_text()
+        other_namespace = json.loads(original)
+        other_namespace['pid_namespace'] = 'pid:[0]'
+        ledger.write_text(json.dumps(other_namespace))
+        with (previous / 'workflow-temp.lock').open('r+') as lease:
+            fcntl.flock(lease, fcntl.LOCK_EX)
+            self.run_temp(latest, 'pass')
+            self.assertTrue(cache.exists())
+        self.assertEqual(self.run_temp(latest, read_cache), 'cached')
+        self.assertFalse((cache / 'cache-entry').exists())
+        self.assertTrue((scratch / 'scratch-entry').exists())
+        ledger.write_text(original)
+        report = self.root / 'report.md'
+        report.write_text('Verified')
+        self.cli('finish', '--run', latest['id'], '--report', str(report))
+        # The legacy test adapter lists only the initial pane. Model its
+        # restart tab as already closed when the review is accepted.
+        Path(str(self.log) + '.closed').touch()
+        result = self.cli('complete', 'one')
+        self.assertEqual(result['temporary_cleanup']['status'], 'completed')
+        for run in (first, skipped, latest):
+            self.assertFalse((self.state / 'workflow-temp' / run['id']).exists())
+            self.assertTrue((self.state / 'runs' / run['id'] / 'assignment.md').is_file())
+        self.assertTrue((self.state / 'runs' / latest['id'] / 'result.md').is_file())
+        self.assertEqual(self.cli('complete', 'one')['temporary_cleanup'], result['temporary_cleanup'])
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux temporary storage')
+    def test_temporary_sweep_respects_age_open_file_and_socket(self):
+        run = self.run_ready()
+        scratch = Path(self.run_temp(run, 'import os; print(os.environ["TMPDIR"])'))
+        lease = self.state / 'runs' / run['id'] / 'workflow-temp.lock'
+        data = scratch / 'output'
+        data.write_text('keep until idle')
+        younger = time.time() - 86399
+        os.utime(lease, (younger, younger))
+        self.assertEqual(self.cli('temp-sweep')['items'], [])
+        older = time.time() - 86401
+        alias = self.root / 'linked-output'
+        alias.hardlink_to(data)
+        os.utime(lease, (older, older))
+        with alias.open() as stream:
+            self.assertEqual(self.cli('temp-sweep')['items'][0]['status'], 'in_use')
+            self.assertEqual(stream.read(), 'keep until idle')
+        holder = subprocess.Popen(
+            [sys.executable, '-c', '''
+import ctypes, mmap, sys
+with open(sys.argv[1], 'rb') as file:
+    mapping = mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ)
+import os
+os.chdir(sys.argv[2])
+assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0  # PR_SET_DUMPABLE
+print("ready", flush=True)
+sys.stdin.read(1)
+assert mapping[:4] == b"keep"
+assert os.getcwd() == sys.argv[2]
+''', str(alias), str(scratch)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), 'ready')
+            os.utime(lease, (older, older))
+            result = subprocess.run(self.argv('temp-sweep'), env=self.env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn('недоступны', json.loads(result.stdout)['items'][0]['error'])
+            self.assertTrue(data.exists())
+        finally:
+            stdout, stderr = holder.communicate(input='\n', timeout=5)
+            self.assertEqual(holder.returncode, 0, stdout + stderr)
+        os.utime(lease, (older, older))
+        socket_path = scratch / 'listener.sock'
+        os.mknod(socket_path, stat.S_IFSOCK | 0o600)
+        result = subprocess.run(self.argv('temp-sweep'), env=self.env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertTrue(socket_path.is_socket())
+        socket_path.unlink()
+        directory = self.state / 'workflow-temp' / run['id']
+        quarantine = directory.with_name(f'.{run["id"]}.deleting')
+        directory.rename(quarantine)
+        directory.symlink_to(self.root, target_is_directory=True)
+        result = subprocess.run(self.argv('temp-sweep'), env=self.env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertTrue(directory.is_symlink())
+        self.assertTrue(alias.exists())
+        directory.unlink()
+        (quarantine / '.active' / 'abandoned-activity').touch()
+        self.assertEqual(self.cli('temp-sweep')['items'], [])
+        self.assertTrue(scratch.exists())
+        for i in range(1200):
+            (scratch / str(i)).touch()
+        os.utime(lease, (older, older))
+        def limit_descriptors():
+            _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (1024, hard))
+
+        result = subprocess.run(self.argv('temp-sweep'), env=self.env,
+                                capture_output=True, text=True, timeout=10,
+                                preexec_fn=limit_descriptors)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)['items'][0]['status'], 'removed')
+        self.assertFalse(scratch.exists())
+        self.assertEqual(alias.read_text(), 'keep until idle')
+        self.assertTrue((self.state / 'runs' / run['id'] / 'assignment.md').exists())
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux temporary storage')
+    def test_temporary_cancel_stops_owned_descendant_and_retries_after_failure(self):
+        run = self.run_ready()
+        scratch = Path(self.run_temp(run, 'import os; print(os.environ["TMPDIR"])'))
+        data = scratch / 'open-by-outsider'
+        data.touch()
+        pid_file = self.root / 'detached-pid'
+        process = subprocess.Popen(
+            self.argv('temp-exec', '--run', run['id'], '--', sys.executable, '-c', '''
+from pathlib import Path
+import subprocess, sys
+child = subprocess.Popen(
+    [sys.executable, "-c", "import ctypes, time; ctypes.CDLL(None).prctl(4, 0, 0, 0, 0); time.sleep(8)"],
+    env={}, close_fds=True, start_new_session=True,
+)
+Path(sys.argv[1]).write_text(str(child.pid))
+''', str(pid_file)), env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self.addCleanup(self.wait_process, process)
+        deadline = time.monotonic() + 5
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        pid = int(pid_file.read_text())
+        lease = self.state / 'runs' / run['id'] / 'workflow-temp.lock'
+        older = time.time() - 86401
+        os.utime(lease, (older, older))
+        self.assertEqual(self.cli('temp-sweep')['items'][0]['status'], 'in_use')
+        self.assertTrue(Path(f'/proc/{pid}').exists())
+        with data.open():
+            failure = subprocess.run(self.argv('complete', 'one', '--status', 'cancelled'),
+                                     env=self.env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(failure.returncode, 1, failure.stdout)
+            result = json.loads(failure.stdout)
+            self.assertEqual(result['temporary_cleanup']['status'], 'failed')
+            self.assertEqual(result['cleanup']['status'], 'closed')
+            self.assertTrue(data.exists())
+            process.communicate(timeout=5)
+            self.assertFalse(Path(f'/proc/{pid}').exists())
+        result = self.cli('complete', 'one', '--status', 'cancelled')
+        self.assertEqual(result['temporary_cleanup']['status'], 'completed')
+        self.assertFalse(scratch.exists())
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux temporary storage')
+    def test_temporary_inspector_rejects_untrusted_executable(self):
+        run = self.run_ready()
+        scratch = Path(self.run_temp(run, 'import os; print(os.environ["TMPDIR"])'))
+        data = scratch / 'must-survive'
+        data.touch()
+        fake = self.root / 'fake-inspector'
+        marker = self.root / 'executed'
+        fake.write_text(f'#!/bin/sh\ntouch "{marker}"\nprintf \'{{"version":1,"used":false}}\\n\'\n')
+        fake.chmod(0o755)
+        self.bindings.mkdir(exist_ok=True)
+        runtime = self.bindings / 'runtime.json'
+        runtime.write_text(json.dumps({'temp_inspector': str(fake)}))
+        lease = self.state / 'runs' / run['id'] / 'workflow-temp.lock'
+        older = time.time() - 86405
+        os.utime(lease, (older, older))
+        result = subprocess.run(self.argv('temp-sweep'), env=self.env, capture_output=True,
+                                text=True, timeout=10)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('должны принадлежать root', json.loads(result.stdout)['items'][0]['error'])
+        self.assertFalse(marker.exists())
+        self.assertTrue(data.exists())
+        runtime.unlink()
+        self.assertEqual(self.cli('temp-sweep')['items'][0]['status'], 'removed')
+
+    @staticmethod
+    def wait_process(process):
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=10)
 
     def test_schedule_tick_race_cancel_and_restart(self):
         from datetime import datetime, timedelta, timezone

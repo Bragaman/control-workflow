@@ -12,6 +12,7 @@ __pycache__/
 /memory/
 /notifications/
 /worktrees/
+/workflow-temp/
 /views/
 /status/
 /config.json

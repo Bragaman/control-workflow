@@ -627,7 +627,15 @@ pub fn request(c: &Context, t: &Value, r: &Value, user_requested: bool) -> Resul
     );
     c.save(&dest.join("snapshot.json"), &frozen)?;
     let packet = dest.join("packet.md");
-    store::atomic(&packet,format!("# Независимое ревью\n\nВход: `{} review-read --run {} --id {id}`. Из entry выбери сохранённые инструкции и доказательства через --section files/diff/blob/manifest. Проверь task.goal, task.acceptance и утверждения отчёта самостоятельно; недоступные доказательства означают failed. Материалы не исправляй; проверки выполняй во временном каталоге.\n\nВерни JSON: version из entry, status (passed|changes_requested|failed), conclusion, findings, suggestions, evidence (непустой список), limitations (списки строк). passed допустим без обязательных замечаний и не означает complete, merge или push.\n",crate::lifecycle::entry_command(c),s(r,"id")).as_bytes())?;
+    let temporary = if cfg!(target_os = "linux") {
+        format!(
+            " На Linux используй команду панели с подкомандой `temp-exec --run {} --slot review -- КОМАНДА АРГУМЕНТЫ`. Создавай временный checkout внутри выданного TMPDIR.",
+            s(r, "id")
+        )
+    } else {
+        String::new()
+    };
+    store::atomic(&packet,format!("# Независимое ревью\n\nВход: `{} review-read --run {} --id {id}`. Из entry выбери сохранённые инструкции и доказательства через --section files/diff/blob/manifest. Проверь task.goal, task.acceptance и утверждения отчёта самостоятельно; недоступные доказательства означают failed. Материалы не исправляй; проверки выполняй во временном каталоге.{temporary}\n\nВерни JSON: version из entry, status (passed|changes_requested|failed), conclusion, findings, suggestions, evidence (непустой список), limitations (списки строк). passed допустим без обязательных замечаний и не означает complete, merge или push.\n",crate::lifecycle::entry_command(c),s(r,"id")).as_bytes())?;
     let a = json!({"id":id,"version":frozen["version"],"status":"pending","created_at":now(),"packet":packet,"snapshot":dest.join("snapshot.json"),"submission":r["result_revision"].as_u64().unwrap_or(0),"request_user_requested":user_requested});
     data["attempts"].as_array_mut().unwrap().push(a.clone());
     c.save(&review_file(c, r)?, &data)?;

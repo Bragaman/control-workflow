@@ -9,5 +9,5 @@ python3 -m ruff check
 cargo test --locked
 cargo build --locked --release
 python3 scripts/release_audit.py
-CONTROL_WORKFLOW_BIN="$PWD/target/release/control-workflow" PYTHONDONTWRITEBYTECODE=1 \
+CONTROL_WORKFLOW_BIN="${CARGO_TARGET_DIR:-$PWD/target}/release/control-workflow" PYTHONDONTWRITEBYTECODE=1 \
     python3 -m unittest discover -s tests -v
