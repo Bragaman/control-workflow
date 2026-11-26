@@ -15,11 +15,22 @@ python3 -m pip install -r requirements-dev.txt
 sh scripts/check.sh
 ```
 
-scripts/check.sh — общая команда локальной проверки и CI:
-Rust fmt/clippy, Ruff, Rust-тесты, release-сборка, аудит поставки и Python-контракты.
+Скрипт `scripts/check.sh` запускает Rust fmt/clippy, Ruff, тесты Rust,
+release-сборку, аудит поставки и контрактные тесты Python. CI вызывает тот же скрипт.
 Тесты вызывают CLI/MCP с временными state/config/bindings, Git remote и fake herdr;
 реальные агенты и табы не запускаются. Проверки реальных адаптеров выполняются
 отдельно по [матрице приёмки](compatibility.md).
+
+В Linux CI запускает скрипт в отдельном PID namespace с собственным `/proc`
+от имени пользователя runner. Тесты очистки проверяют, что при недоступных
+ссылках процесса панель сохраняет данные. Если посторонний процесс мешает
+проверкам на Linux, запусти скрипт в таком же окружении. Для запуска команды
+без sudo нужны разрешённые пользовательские пространства имён.
+
+```sh
+unshare --user --map-current-user --pid --fork --mount-proc --kill-child \
+  setpriv --no-new-privs sh scripts/check.sh
+```
 
 После изменения файлов поставки обнови distribution.json:
 

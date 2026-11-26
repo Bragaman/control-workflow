@@ -9,9 +9,6 @@ import re
 import subprocess
 from urllib.parse import unquote, urlsplit
 
-SCRIPTS = ('control', 'completion_git', 'install_skills', 'artifact_links', 'herdr_codex',
-           'runtime_config', 'platform_support', 'agent_adapters', 'herdr_claude', 'install',
-           'doctor', 'release_audit', 'agent_review')
 DOCS = ('worker', 'planning', 'control-entry', 'git-policy', 'recovery', 'runtime-layout',
         'agent-review', 'install', 'architecture', 'compatibility', 'questions', 'task-profile',
         'model-policy', 'schedules')
@@ -20,15 +17,14 @@ ALLOWLIST = ({'README.md', 'CHANGELOG.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', 
               'config/defaults.json', 'config/model-policy.json',
               'pyproject.toml', 'requirements-dev.txt', 'scripts/check.sh', 'scripts/check_release.py', 'scripts/install.sh',
               'examples/config-codex.json', 'examples/config-claude.json',
-              'examples/project.json', 'examples/task.md', '.github/workflows/check.yml',
+              'examples/project.json', 'examples/task.md', 'scripts/release_audit.py',
               'skills/control-sync/references/checks.md'} |
-             {'scripts/' + name + '.py' for name in SCRIPTS} |
              {'docs/' + name + '.md' for name in DOCS} |
              {'skills/control-' + name + '/SKILL.md' for name in SKILLS} |
              {'tests/test_' + name + '.py' for name in ('control', 'runtime', 'public')})
 NATIVE_FILES = {'build.rs', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
                 '.github/workflows/rust.yml', 'docs/rust.md', 'tests/native.rs',
-                'tests/test_native.py', 'tests/test_mcp.py', 'tests/test_interop.py',
+                'tests/test_mcp.py', 'tests/test_interop.py',
                 'tests/test_model_policy.py', 'tests/test_hc.py', 'tests/test_build_version.py', 'tests/mcp_client.py'} | {
     'src/' + name for name in ('args.rs', 'casefold.rs', 'commands.json', 'config.rs', 'core.rs',
                                'external.rs', 'git.rs', 'hc.rs', 'lib.rs', 'lifecycle.rs',
@@ -41,10 +37,14 @@ ALLOWLIST |= PUBLIC_DOCS
 ALLOWLIST |= NATIVE_FILES
 ALLOWLIST |= {'mkdocs.yml', 'requirements-docs.txt', 'scripts/prepare_docs.py',
               '.github/workflows/docs.yml'}
-# The original license placeholder remains valid only in preserved historical trees.
-HISTORY_ALLOWLIST = ALLOWLIST | {'LICENSE.pending'}
-ALLOWLIST -= {'scripts/' + name + '.py' for name in SCRIPTS if name != 'release_audit'}
-ALLOWLIST -= {'.github/workflows/check.yml', 'tests/test_native.py'}
+# Retired Python runtime and license placeholder are allowed in Git history.
+HISTORY_ALLOWLIST = ALLOWLIST | {
+    'LICENSE.pending', '.github/workflows/check.yml', 'tests/test_native.py',
+    'scripts/control.py', 'scripts/completion_git.py', 'scripts/install_skills.py',
+    'scripts/artifact_links.py', 'scripts/herdr_codex.py', 'scripts/runtime_config.py',
+    'scripts/platform_support.py', 'scripts/agent_adapters.py', 'scripts/herdr_claude.py',
+    'scripts/install.py', 'scripts/doctor.py', 'scripts/agent_review.py',
+}
 PRIVATE = re.compile(r'/home/(?:dm|[a-z][a-z0-9_-]*)/|run-[a-f0-9]{12}|'
                      r'-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----|'
                      r'\bAKIA[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{24,}')

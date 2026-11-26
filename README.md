@@ -12,8 +12,9 @@
 ## Как устроена работа
 
 Проект объединяет контекст и задачи. У каждой задачи есть цель, критерии готовности
-и один или несколько запусков с планом и результатами. Через Herdr Core один диалог
-Codex можно открыть в Herdr Desktop, штатном TUI или собственном клиенте.
+и один или несколько запусков с планом и результатами. Штатный Herdr TUI запускает
+Codex и Claude Code. С адаптером `hc-codex` к одному терминалу Codex можно
+подключиться через Herdr Desktop, консоль или свой клиент.
 
 Для изменения кода панель создаёт отдельный Git worktree. Исследования и применение
 готовых настроек можно выполнять без него. Завершённую работу агент передаёт на
@@ -21,8 +22,6 @@ Codex можно открыть в Herdr Desktop, штатном TUI или со
 
 ## Дальше
 
-- [Установка](https://bragaman.github.io/control-workflow/docs/guide/installation/) — зависимости и подготовка экземпляра.
-- [Первая задача](https://bragaman.github.io/control-workflow/docs/guide/first-task/) — пройти цикл от постановки до приёмки.
 - [Работа с задачами](https://bragaman.github.io/control-workflow/docs/guide/workflow/) — статусы, вопросы, ревью и Git.
 - [Настройки](https://bragaman.github.io/control-workflow/docs/guide/settings/) — хранение данных, выбор модели и подключение к исполнителю.
 - [Справка](https://bragaman.github.io/control-workflow/docs/guide/reference/) — команды и решение типичных проблем.

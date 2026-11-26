@@ -25,8 +25,17 @@ pub(crate) fn output_with_input(
     timeout: Duration,
     input: Stdio,
 ) -> Result<(bool, String, String)> {
-    let mut out = tempfile::tempfile()?;
-    let mut err = tempfile::tempfile()?;
+    output_in(cmd, timeout, input, &tempfile::env::temp_dir())
+}
+
+fn output_in(
+    cmd: &mut Command,
+    timeout: Duration,
+    input: Stdio,
+    directory: &Path,
+) -> Result<(bool, String, String)> {
+    let mut out = tempfile::tempfile_in(directory)?;
+    let mut err = tempfile::tempfile_in(directory)?;
     let mut child = cmd
         .stdin(input)
         .stdout(out.try_clone()?)
@@ -57,10 +66,16 @@ pub(crate) fn output_with_input(
     Ok((status.success(), stdout, stderr))
 }
 pub fn command(argv: &[&str]) -> Result<String> {
+    command_in(argv, &tempfile::env::temp_dir())
+}
+
+fn command_in(argv: &[&str], directory: &Path) -> Result<String> {
     ensure!(!argv.is_empty(), "Пустая команда");
-    let (ok, out, err) = output(
+    let (ok, out, err) = output_in(
         Command::new(argv[0]).args(&argv[1..]),
         Duration::from_secs(60),
+        Stdio::null(),
+        directory,
     )?;
     ensure!(
         ok,
@@ -342,7 +357,12 @@ pub fn machine_id() -> Result<String> {
     }
     #[cfg(target_os = "macos")]
     {
-        let text = command(&["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice"])?;
+        // Reopening an existing hc terminal must work after its scratch
+        // directory (which TMPDIR can point to) has been removed.
+        let text = command_in(
+            &["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+            Path::new("/tmp"),
+        )?;
         let re = regex::Regex::new(r#""IOPlatformUUID"\s*=\s*"([^"\n]+)""#)?;
         Ok(re
             .captures(&text)

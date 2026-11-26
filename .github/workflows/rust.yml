@@ -28,7 +28,17 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: python3 -m pip install -r requirements-dev.txt
-      - run: sh scripts/check.sh
+      - name: Check Linux in an isolated PID namespace
+        if: runner.os == 'Linux'
+        run: |
+          # The cleanup tests require a complete /proc view of their own processes.
+          sudo unshare --pid --fork --mount-proc --kill-child -- \
+            setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups --no-new-privs \
+            env PATH="$PATH" HOME="$HOME" CONTROL_WORKFLOW_RELEASE_TAG="$CONTROL_WORKFLOW_RELEASE_TAG" \
+            sh scripts/check.sh
+      - name: Check macOS
+        if: runner.os == 'macOS'
+        run: sh scripts/check.sh
       - name: Install from checkout
         run: |
           set -eu

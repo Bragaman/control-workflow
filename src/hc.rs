@@ -107,11 +107,11 @@ fn command(c: &Context, session: &str) -> Command {
     cmd
 }
 
-fn identity(session: &str, status: &Value) -> Result<Value> {
+fn identity(session: &str, status: &Value, machine: &str) -> Result<Value> {
     ensure!(!s(&status["core"], "id").is_empty(), "hc не вернул core.id");
     Ok(
         json!({"transport":"hc","session":session,"core":status["core"]["id"],
-        "machine":external::machine_id()?,"uid":unsafe{libc::getuid()}}),
+        "machine":machine,"uid":unsafe{libc::getuid()}}),
     )
 }
 
@@ -125,10 +125,11 @@ pub fn namespace(c: &Context, session: &str) -> Result<Value> {
             .or_else(|| reported_error(&out))
             .unwrap_or_else(|| anyhow!("Не удалось открыть hc: {err}{out}")));
     }
-    let ns = identity(session, &serde_json::from_str(&out)?)?;
+    let machine = external::machine_id()?;
+    let ns = identity(session, &serde_json::from_str(&out)?, &machine)?;
     // Starting the core and reaching it over the worker's transport are
     // separate checks. Prove access before the caller records a new run.
-    drop(Connection::connect(c, session, &ns)?);
+    drop(Connection::connect(c, session, &ns, &machine)?);
     Ok(ns)
 }
 
@@ -163,12 +164,17 @@ fn capture_stderr(child: &mut Child) -> io::Result<mpsc::Receiver<Vec<u8>>> {
 
 impl Connection {
     fn open(c: &Context, r: &Value) -> Result<Self> {
-        Self::connect(c, s(r, "herdr_session"), &r["herdr_namespace"])
+        Self::connect(
+            c,
+            s(r, "herdr_session"),
+            &r["herdr_namespace"],
+            &external::machine_id()?,
+        )
     }
 
-    fn connect(c: &Context, session: &str, ns: &Value) -> Result<Self> {
+    fn connect(c: &Context, session: &str, ns: &Value, machine: &str) -> Result<Self> {
         ensure!(
-            ns["machine"] == external::machine_id()?
+            ns["machine"] == machine
                 && ns["session"] == session
                 && ns["uid"] == unsafe { libc::getuid() },
             "Запуск hc принадлежит другой машине или сессии"
@@ -209,7 +215,7 @@ impl Connection {
             }
         };
         ensure!(
-            identity(session, &status)? == *ns,
+            identity(session, &status, machine)? == *ns,
             "Изменилась идентичность core запуска"
         );
         Ok(conn)
